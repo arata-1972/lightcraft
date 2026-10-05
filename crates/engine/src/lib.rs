@@ -10,6 +10,7 @@
 //! run them off the UI thread.
 #![forbid(unsafe_code)]
 
+mod camera_preview;
 pub mod cmd;
 pub mod crs;
 pub mod crs_masks;

@@ -59,9 +59,7 @@ Ordered by user impact, then tier, then effort. The checklist above counts featu
 that decide whether a photographer can switch (see the honest assessment in [ROADMAP.md](../ROADMAP.md#where-we-stand)).
 Take the first one nobody is working on.
 
-1. **LR-PROF-CAMERACOLOR** (P0): our own camera colour calibration. Every non-DNG raw is developed with a neutral
-   matrix today, so colours are muted. Start by fitting each camera to its own embedded JPEG and using matrices the
-   files carry themselves; never Adobe data.
+1. **LR-PROF-CAMERACOLOR** (P0): our own camera colour calibration. ARW now has guarded per-file embedded-JPEG fitting; measured calibration and fidelity remain missing. Other non-DNG raws and rejected fits still use a neutral matrix. Expand validated preview fitting and use matrices the files carry themselves; never Adobe data.
 2. **LR-IMP-FORMATS** (P0): **CR3** first (every Canon body since ~2018), then compressed RAF / ORF, RW2 v4, Nikon
    "lossy after split" NEF, Canon sRAW; HEIC/AVIF decode. Clean-room, from prose descriptions only (see
    `crates/raw/src/vendor/nefc.rs` for how compressed NEF was done). Until decoded, such photos are `preview_only`.
@@ -276,7 +274,7 @@ under the UI command that wraps it (a no-op error); the UI command now wins.
 | LR-PROF-ADOBE | Standard raw looks (own equivalents) | P0 | ✅ | `crates/engine/src/presets.rs` (`PROFILES`), `crates/pipeline/src/profiles.rs` | six own looks: Color, Neutral, Vivid, Landscape, Portrait, Monochrome |
 | LR-PROF-ADAPTIVE | Adaptive profiles | P2 | ⬜ | | |
 | LR-PROF-CAMERA | Camera-matching looks | P2 | ⬜ | | |
-| LR-PROF-CAMERACOLOR | Camera colour calibration (own) | P0 | 🟡 | `crates/raw/src/color.rs` | DNG files use the colour matrices they carry; every other raw uses a neutral fallback (camera RGB ≈ linear sRGB, `matrix_is_fallback`) with as-shot white balance, so colours are muted and not accurate. Needs our own per-camera calibration: matrices the files carry themselves (e.g. Olympus `ColorMatrix`), fitting each camera to its own embedded JPEG, then chart shots. Adobe matrices / DCPs are never used. Biggest image-quality gap today |
+| LR-PROF-CAMERACOLOR | Camera colour calibration (own) | P0 | 🟡 | `crates/raw/src/color.rs`, `crates/engine/src/camera_preview.rs` | DNG files use the colour matrices they carry; ARW has guarded per-file embedded-JPEG colour fitting (see docs/camera-preview-colour.md), not measured camera calibration; other raws and rejected fits use a neutral fallback (camera RGB ≈ linear sRGB, `matrix_is_fallback`) with as-shot white balance, so colours are muted and not accurate. Needs our own per-camera calibration: matrices the files carry themselves (e.g. Olympus `ColorMatrix`), fitting each camera to its own embedded JPEG, then chart shots. Adobe matrices / DCPs are never used. Biggest image-quality gap today |
 | LR-PROF-CREATIVE | Creative profiles (own) | P2 | ✅ | `cmd:develop.profile`, `crates/pipeline/src/profiles.rs` | 16 own looks in Film / Cinematic / Muted / B&W (tone + point-curve fades, colour grading, mixer / B&W mix); scale with `ctl:profile.amount`; sliders untouched |
 | LR-PROF-LEGACY | Legacy profiles | P2 | ⬜ | | |
 | LR-PROF-NONRAW | Profiles for non-raw files | P0 | ✅ | `cmd:develop.profile` | same looks apply to JPEG/TIFF |

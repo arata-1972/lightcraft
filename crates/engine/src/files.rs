@@ -221,6 +221,9 @@ fn load_bytes_now(bytes: std::borrow::Cow<'_, [u8]>, max_edge: usize) -> Result<
             }
             Err(e) => return Err(e.to_string()),
         };
+        let xy = lightcraft_raw::color::as_shot_white_xy(&raw);
+        let t = lightcraft_raw::color::camera_transform(&raw, xy);
+        let preview_matrix = crate::camera_preview::fit_preview(&raw, &bytes, &t);
         drop(bytes);
         // Embedded lens corrections are applied by the pipeline ("Enable Profile Corrections"), not baked in.
         let lens = embedded_lens(&raw.info());
@@ -242,12 +245,10 @@ fn load_bytes_now(bytes: std::borrow::Cow<'_, [u8]>, max_edge: usize) -> Result<
         // the samples aren't needed any more (the colour model below reads only the tags)
         raw.data = lightcraft_raw::RawData::U16(Vec::new());
         let mut stages = vec![("develop", t0.elapsed())];
-        let xy = lightcraft_raw::color::as_shot_white_xy(&raw);
-        let t = lightcraft_raw::color::camera_transform(&raw, xy);
         stages.push(("transform", t0.elapsed()));
         lightcraft_raw::highlight::reconstruct(&mut img, t.wb, HIGHLIGHT_CLIP);
         stages.push(("highlights", t0.elapsed()));
-        let m = t.matrix.to_f32();
+        let m = preview_matrix.map(|p| p.mul(&t.matrix)).unwrap_or(t.matrix).to_f32();
         let gain = 2f32.powf(t.baseline_exposure as f32);
         let wb = t.wb;
         img.map_in_place(|p| {
