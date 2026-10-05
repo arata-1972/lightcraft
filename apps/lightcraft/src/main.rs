@@ -4,7 +4,7 @@
 //!
 //! The library (catalog, presets, thumbnail cache) lives in `--library DIR`, else
 //! `$LIGHTCRAFT_LIBRARY`, else the library last opened with Settings → Open Library…, else
-//! `~/Pictures/LightCraft Library`; a new library starts with the
+//! `~/Pictures/LightCraft Library` (`LightCraft Japanese Library` with `japanese-local`); a new library starts with the
 //! procedural demo photos unless `--no-demo` or files are given. Files and folders on the command
 //! line are imported (duplicates are skipped). `--memory` runs an in-memory session that writes
 //! nothing (demo photos unless files are given; used by the README showcase scripts).
@@ -67,7 +67,8 @@ impl eframe::App for App {
 
 fn config_dir() -> Option<std::path::PathBuf> {
     if cfg!(target_os = "macos") {
-        std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join("Library/Application Support/LightCraft"))
+        let name = if cfg!(feature = "japanese-local") { "LightCraft Japanese" } else { "LightCraft" };
+        std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join("Library/Application Support").join(name))
     } else if cfg!(windows) {
         std::env::var_os("APPDATA").map(|a| std::path::PathBuf::from(a).join("LightCraft"))
     } else {
@@ -84,7 +85,18 @@ fn load_prefs() -> Option<UiState> {
         return None;
     }
     let bytes = std::fs::read(config_dir()?.join("ui.json")).ok()?;
-    serde_json::from_slice::<UiState>(&bytes).ok().map(UiState::sanitized)
+    decode_saved_ui(&bytes)
+}
+
+fn decode_saved_ui(bytes: &[u8]) -> Option<UiState> {
+    let mut saved: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    if saved.get("language").is_none()
+        && let Some(language) = saved.pointer("/settings/language").cloned()
+        && let Some(object) = saved.as_object_mut()
+    {
+        object.insert("language".into(), language);
+    }
+    serde_json::from_value::<UiState>(saved).ok().map(UiState::sanitized)
 }
 
 fn save_prefs(app: &LightcraftApp) {
@@ -101,7 +113,9 @@ fn save_prefs(app: &LightcraftApp) {
 
 fn services() -> Services {
     Services {
-        pick_folder: Some(Box::new(|| rfd::FileDialog::new().set_title("Open Library").pick_folder().map(|p| p.to_string_lossy().to_string()))),
+        pick_folder: Some(Box::new(|| {
+            rfd::FileDialog::new().set_title(lightcraft_ui_egui::i18n::tr("Open Library")).pick_folder().map(|p| p.to_string_lossy().to_string())
+        })),
         open_with: Some(Box::new(|path: &str, app: &str| {
             // spawned, never waited for: the editor runs alongside
             let app = app.trim();
@@ -153,7 +167,7 @@ fn services() -> Services {
         pick_files: Some(Box::new(|| {
             rfd::FileDialog::new()
                 .add_filter(
-                    "Photos",
+                    lightcraft_ui_egui::i18n::tr("Photos"),
                     &[
                         "jpg", "jpeg", "png", "tif", "tiff", "webp", "dng", "cr2", "cr3", "nef", "nrw", "arw", "raf", "orf", "rw2", "pef", "psd",
                         "jxl", "gif", "bmp",
@@ -167,8 +181,11 @@ fn services() -> Services {
         })),
         pick_preset_files: Some(Box::new(|| {
             rfd::FileDialog::new()
-                .set_title("Import Presets")
-                .add_filter("Presets & Profiles", &["lcpreset", "xmp", "lrtemplate", "zip", "dng", "lmp", "mplumpack", "cube"])
+                .set_title(lightcraft_ui_egui::i18n::tr("Import Presets"))
+                .add_filter(
+                    lightcraft_ui_egui::i18n::tr("Presets & Profiles"),
+                    &["lcpreset", "xmp", "lrtemplate", "zip", "dng", "lmp", "mplumpack", "cube"],
+                )
                 .pick_files()
                 .unwrap_or_default()
                 .into_iter()
@@ -177,24 +194,24 @@ fn services() -> Services {
         })),
         pick_tracklog: Some(Box::new(|| {
             rfd::FileDialog::new()
-                .set_title("Auto-Tag from Tracklog")
-                .add_filter("GPS Track Log", &["gpx"])
+                .set_title(lightcraft_ui_egui::i18n::tr("Auto-Tag from Tracklog"))
+                .add_filter(lightcraft_ui_egui::i18n::tr("GPS Track Log"), &["gpx"])
                 .pick_file()
                 .map(|p| vec![p.to_string_lossy().to_string()])
                 .unwrap_or_default()
         })),
         save_preset_file: Some(Box::new(|name: &str| {
             rfd::FileDialog::new()
-                .set_title("Export Presets")
-                .add_filter("LightCraft Preset", &["lcpreset"])
+                .set_title(lightcraft_ui_egui::i18n::tr("Export Presets"))
+                .add_filter(lightcraft_ui_egui::i18n::tr("LightCraft Preset"), &["lcpreset"])
                 .set_file_name(name)
                 .save_file()
                 .map(|p| p.to_string_lossy().to_string())
         })),
         pick_curve_preset_files: Some(Box::new(|| {
             rfd::FileDialog::new()
-                .set_title("Import Point Curve Presets")
-                .add_filter("Point Curve Presets", &["lccurve", "json"])
+                .set_title(lightcraft_ui_egui::i18n::tr("Import Point Curve Presets"))
+                .add_filter(lightcraft_ui_egui::i18n::tr("Point Curve Presets"), &["lccurve", "json"])
                 .pick_files()
                 .unwrap_or_default()
                 .into_iter()
@@ -203,8 +220,8 @@ fn services() -> Services {
         })),
         save_curve_preset_file: Some(Box::new(|name: &str| {
             rfd::FileDialog::new()
-                .set_title("Export Point Curve Presets")
-                .add_filter("Point Curve Presets", &["lccurve"])
+                .set_title(lightcraft_ui_egui::i18n::tr("Export Point Curve Presets"))
+                .add_filter(lightcraft_ui_egui::i18n::tr("Point Curve Presets"), &["lccurve"])
                 .set_file_name(name)
                 .save_file()
                 .map(|p| p.to_string_lossy().to_string())
@@ -311,7 +328,13 @@ fn main() -> eframe::Result {
             .filter(|p| !p.is_empty() && std::env::var_os("LIGHTCRAFT_LIBRARY").is_none())
             .map(Into::into)
     });
-    let library_dir = library_dir.or_else(lightcraft_engine::library::default_dir);
+    let library_dir = library_dir.or_else(|| {
+        if let Some(path) = std::env::var_os("LIGHTCRAFT_LIBRARY").filter(|p| !p.is_empty()) {
+            return Some(path.into());
+        }
+        let name = if cfg!(feature = "japanese-local") { "LightCraft Japanese Library" } else { "LightCraft Library" };
+        std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join("Pictures").join(name))
+    });
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("LightCraft")
@@ -332,9 +355,13 @@ fn main() -> eframe::Result {
         Box::new(move |cc| {
             let session = open_session(in_memory, library_dir, seed_demo && files.is_empty());
             let mut app = LightcraftApp::new(session, services());
+            if cfg!(feature = "japanese-local") {
+                app.ui.language = lightcraft_ui_egui::i18n::Language::Ja;
+            }
             if let Some(ui) = prefs {
                 app.ui = ui;
             }
+            lightcraft_ui_egui::i18n::set_language(app.ui.language);
             app.integrated_titlebar = cfg!(target_os = "macos");
             if let Some(port) = control_port {
                 let rx = control_server::start(port, cc.egui_ctx.clone());
@@ -355,4 +382,17 @@ fn main() -> eframe::Result {
             )))
         }),
     )
+}
+
+#[cfg(test)]
+mod preference_tests {
+    use super::decode_saved_ui;
+    use lightcraft_ui_egui::i18n::Language;
+    #[test]
+    fn language_migrates_and_upstream_choice_wins() {
+        assert_eq!(decode_saved_ui(br#"{"settings":{"language":"ja"}}"#).unwrap().language, Language::Ja);
+        assert_eq!(decode_saved_ui(br#"{"language":"en","settings":{"language":"ja"}}"#).unwrap().language, Language::En);
+        assert_eq!(decode_saved_ui(br#"{"language":"ja"}"#).unwrap().language, Language::Ja);
+        assert!(decode_saved_ui(b"not JSON").is_none());
+    }
 }

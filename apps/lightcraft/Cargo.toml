@@ -6,6 +6,10 @@ license.workspace = true
 publish = false
 default-run = "lightcraft"
 
+[features]
+# Keep upstream defaults; only the local Japanese bundle opts into isolated storage and Japanese startup.
+japanese-local = []
+
 [lints]
 workspace = true
 

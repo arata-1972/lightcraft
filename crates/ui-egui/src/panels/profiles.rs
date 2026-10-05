@@ -29,12 +29,12 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
     if icon_button(&mut back, "profilesBack", Icon::ChevronLeft, vec2(28.0, 28.0), false, true, "Back to Edit").clicked() {
         app.ui.right = RightPanel::Edit;
     }
-    ui.painter().text(pos2(hr.left() + 46.0, hr.center().y + 2.0), Align2::LEFT_CENTER, "Profiles", t.semibold(15.0), t.text);
+    ui.painter().text(pos2(hr.left() + 46.0, hr.center().y + 2.0), Align2::LEFT_CENTER, crate::i18n::tr("Profiles"), t.semibold(15.0), t.text);
     divider(ui);
     // the applied profile and its amount
     let (cr, _) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::hover());
     let name = profile(&d.profile.id).map(|p| p.name).unwrap_or("Color");
-    ui.painter().text(pos2(cr.left() + 24.0, cr.center().y), Align2::LEFT_CENTER, "Profile", t.font(13.0), t.text_dim);
+    ui.painter().text(pos2(cr.left() + 24.0, cr.center().y), Align2::LEFT_CENTER, crate::i18n::tr("Profile"), t.font(13.0), t.text_dim);
     ui.painter().text(pos2(cr.left() + 84.0, cr.center().y), Align2::LEFT_CENTER, name, t.font(14.0), t.text_label);
     if d.profile.id != "lc.color" {
         super::edit::control(app, ui, &d, "profile.amount", true);
@@ -126,7 +126,7 @@ fn cell_ui(app: &mut LightcraftApp, ui: &mut egui::Ui, d: &DevelopSettings, id: 
         paint(painter, star.shrink(4.0), if fav { Icon::StarFilled } else { Icon::Star }, if fav || over_star { t.star } else { Color32::WHITE });
     }
     if resp.hovered() && !applied && !over_star {
-        app.hover_preview = Some(HoverPreview { label: format!("Profile: {}", p.name), settings: s.clone() });
+        app.hover_preview = Some(HoverPreview { label: crate::i18n::tr_format!("Profile: {}", p.name), settings: s.clone() });
     }
     let resp = resp.on_hover_text(format!("{} ({})", p.name, p.group));
     if resp.clicked() {

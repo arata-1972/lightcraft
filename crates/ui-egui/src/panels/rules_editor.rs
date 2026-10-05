@@ -98,11 +98,11 @@ fn value_editor(ui: &mut egui::Ui, field: &str, op: &str, v: &mut Value, salt: &
             let Value::Array(a) = v else { return };
             if k == Kind::Number {
                 number_value(ui, &mut a[0], field);
-                ui.label("and");
+                ui.label(crate::i18n::tr("and"));
                 number_value(ui, &mut a[1], field);
             } else {
                 text_value(ui, &mut a[0], 86.0, "2026-01-01", &format!("{salt}-a"));
-                ui.label("and");
+                ui.label(crate::i18n::tr("and"));
                 text_value(ui, &mut a[1], 86.0, "2026-12", &format!("{salt}-b"));
             }
         }
@@ -134,9 +134,9 @@ fn value_editor(ui: &mut egui::Ui, field: &str, op: &str, v: &mut Value, salt: &
 pub fn edit(ui: &mut egui::Ui, rs: &mut RuleSet, salt: &str, depth: usize) {
     let t = Tokens::get(ui.ctx());
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Match").color(t.text_label));
+        ui.label(RichText::new(crate::i18n::tr("Match")).color(t.text_label));
         match_combo(ui, salt, &mut rs.mode);
-        ui.label(RichText::new("of the following rules:").color(t.text_label));
+        ui.label(RichText::new(crate::i18n::tr("of the following rules:")).color(t.text_label));
     });
     let mut remove = None;
     let mut insert: Option<(usize, Rule)> = None;
@@ -146,7 +146,7 @@ pub fn edit(ui: &mut egui::Ui, rs: &mut RuleSet, salt: &str, depth: usize) {
             Rule::Group { group } => {
                 egui::Frame::group(ui.style()).show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        if ui.small_button("−").on_hover_text("Remove this group").clicked() {
+                        if ui.small_button("−").on_hover_text(crate::i18n::tr("Remove this group")).clicked() {
                             remove = Some(i);
                         }
                         ui.vertical(|ui| edit(ui, group, &rsalt, depth + 1));
@@ -182,7 +182,7 @@ pub fn edit(ui: &mut egui::Ui, rs: &mut RuleSet, salt: &str, depth: usize) {
                     });
                     value_editor(ui, field, op, value, &rsalt);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let add = ui.small_button("+").on_hover_text("Add a rule (⌥-click: a group)");
+                        let add = ui.small_button("+").on_hover_text(crate::i18n::tr("Add a rule (⌥-click: a group)"));
                         register(ui.ctx(), format!("button:ruleAdd-{rsalt}"), add.rect);
                         if add.clicked() {
                             let group = ui.input(|i| i.modifiers.alt) && depth < 3;
@@ -191,7 +191,7 @@ pub fn edit(ui: &mut egui::Ui, rs: &mut RuleSet, salt: &str, depth: usize) {
                                 if group { Rule::Group { group: RuleSet { mode: Match::Any, rules: vec![new_rule()] } } } else { new_rule() },
                             ));
                         }
-                        let del = ui.small_button("−").on_hover_text("Remove this rule");
+                        let del = ui.small_button("−").on_hover_text(crate::i18n::tr("Remove this rule"));
                         register(ui.ctx(), format!("button:ruleRemove-{rsalt}"), del.rect);
                         if del.clicked() {
                             remove = Some(i);

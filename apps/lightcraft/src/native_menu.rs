@@ -148,7 +148,7 @@ fn yields_to_text(sc: &str) -> bool {
 
 /// `&` marks a mnemonic in muda labels.
 fn label_text(s: &str) -> String {
-    s.replace('&', "&&")
+    lightcraft_ui_egui::i18n::tr(s).replace('&', "&&")
 }
 
 fn structure_of(bar: &[(String, Vec<MenuNode>)]) -> String {
@@ -171,7 +171,7 @@ fn structure_of(bar: &[(String, Vec<MenuNode>)]) -> String {
             out.push(';');
         }
     }
-    let mut s = String::new();
+    let mut s = format!("{};", lightcraft_ui_egui::i18n::is_japanese());
     for (t, items) in bar {
         s.push_str(t);
         walk(items, &mut s);
@@ -210,30 +210,30 @@ impl NativeMenu {
 
         // the application menu
         let app_menu = Submenu::new("LightCraft", true);
-        let about = MenuItem::with_id("app.about", "About LightCraft", true, None);
-        let settings = MenuItem::with_id(SETTINGS, app.ui.language.tr("Settings…"), true, accelerator(SETTINGS_KEY));
-        let quit = MenuItem::with_id(QUIT, "Quit LightCraft", true, accelerator("Cmd+Q"));
+        let about = MenuItem::with_id("app.about", lightcraft_ui_egui::i18n::tr("About LightCraft"), true, None);
+        let settings = MenuItem::with_id(SETTINGS, lightcraft_ui_egui::i18n::tr("Settings…"), true, accelerator(SETTINGS_KEY));
+        let quit = MenuItem::with_id(QUIT, lightcraft_ui_egui::i18n::tr("Quit LightCraft"), true, accelerator("Cmd+Q"));
         let _ = app_menu.append_items(&[
             &about,
             &PredefinedMenuItem::separator(),
             &settings,
             &PredefinedMenuItem::separator(),
-            &PredefinedMenuItem::services(None),
+            &PredefinedMenuItem::services(Some(lightcraft_ui_egui::i18n::tr("Services"))),
             &PredefinedMenuItem::separator(),
-            &PredefinedMenuItem::hide(Some("Hide LightCraft")),
-            &PredefinedMenuItem::hide_others(None),
-            &PredefinedMenuItem::show_all(None),
+            &PredefinedMenuItem::hide(Some(lightcraft_ui_egui::i18n::tr("Hide LightCraft"))),
+            &PredefinedMenuItem::hide_others(Some(lightcraft_ui_egui::i18n::tr("Hide Others"))),
+            &PredefinedMenuItem::show_all(Some(lightcraft_ui_egui::i18n::tr("Show All"))),
             &PredefinedMenuItem::separator(),
             &quit,
         ]);
         let _ = self.menu.append(&app_menu);
 
         for (title, nodes) in &bar {
-            let sub = Submenu::new(title, true);
-            if title == app.ui.language.tr("Window") {
+            let sub = Submenu::new(label_text(title), true);
+            if title == "Window" {
                 let _ = sub.append_items(&[
-                    &PredefinedMenuItem::minimize(None),
-                    &PredefinedMenuItem::maximize(Some("Zoom")),
+                    &PredefinedMenuItem::minimize(Some(lightcraft_ui_egui::i18n::tr("Minimize"))),
+                    &PredefinedMenuItem::maximize(Some(lightcraft_ui_egui::i18n::tr("Zoom"))),
                     &PredefinedMenuItem::separator(),
                 ]);
             }
@@ -245,15 +245,21 @@ impl NativeMenu {
                 .collect();
             let nodes = tidy_separators(nodes);
             self.append_nodes(&sub, &nodes);
-            if title == app.ui.language.tr("File") {
+            if title == "File" {
                 // ⌘W, the system's own item
-                let _ = sub.append_items(&[&PredefinedMenuItem::separator(), &PredefinedMenuItem::close_window(None)]);
+                let _ = sub.append_items(&[
+                    &PredefinedMenuItem::separator(),
+                    &PredefinedMenuItem::close_window(Some(lightcraft_ui_egui::i18n::tr("Close Window"))),
+                ]);
             }
-            if title == app.ui.language.tr("Window") {
-                let _ = sub.append_items(&[&PredefinedMenuItem::separator(), &PredefinedMenuItem::bring_all_to_front(None)]);
+            if title == "Window" {
+                let _ = sub.append_items(&[
+                    &PredefinedMenuItem::separator(),
+                    &PredefinedMenuItem::bring_all_to_front(Some(lightcraft_ui_egui::i18n::tr("Bring All to Front"))),
+                ]);
                 sub.set_as_windows_menu_for_nsapp();
             }
-            if title == app.ui.language.tr("Help") {
+            if title == "Help" {
                 sub.set_as_help_menu_for_nsapp();
             }
             let _ = self.menu.append(&sub);
@@ -282,12 +288,23 @@ impl NativeMenu {
                     let accel = shortcut.as_deref().filter(|s| !CONTEXTUAL.contains(s)).and_then(accelerator);
                     let handle = match checked {
                         Some(c) => {
-                            let it = CheckMenuItem::with_id(key.clone(), label_text(label), *enabled, *c, accel);
+                            let it = CheckMenuItem::with_id(
+                                key.clone(),
+                                lightcraft_ui_egui::menubar::display_item_label(id, params, label).replace('&', "&&"),
+                                *enabled,
+                                *c,
+                                accel,
+                            );
                             let _ = sub.append(&it);
                             Handle::Check(it)
                         }
                         None => {
-                            let it = MenuItem::with_id(key.clone(), label_text(label), *enabled, accel);
+                            let it = MenuItem::with_id(
+                                key.clone(),
+                                lightcraft_ui_egui::menubar::display_item_label(id, params, label).replace('&', "&&"),
+                                *enabled,
+                                accel,
+                            );
                             let _ = sub.append(&it);
                             Handle::Plain(it)
                         }
@@ -325,6 +342,7 @@ impl NativeMenu {
     /// Per frame: run chosen items, then sync labels / enabled / checked and the text-focus
     /// accelerators with the app state.
     pub fn update(&mut self, app: &mut LightcraftApp, ctx: &egui::Context) {
+        lightcraft_ui_egui::i18n::set_language(app.ui.language);
         while let Ok(key) = self.rx.try_recv() {
             if key == QUIT {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -352,8 +370,8 @@ impl NativeMenu {
                         let Some(it) = items.get_mut(&MenuNode::key(id, params)) else { continue };
                         if it.label != *label {
                             match &it.handle {
-                                Handle::Plain(h) => h.set_text(label_text(label)),
-                                Handle::Check(h) => h.set_text(label_text(label)),
+                                Handle::Plain(h) => h.set_text(lightcraft_ui_egui::menubar::display_item_label(id, params, label).replace('&', "&&")),
+                                Handle::Check(h) => h.set_text(lightcraft_ui_egui::menubar::display_item_label(id, params, label).replace('&', "&&")),
                             }
                             it.label = label.clone();
                         }

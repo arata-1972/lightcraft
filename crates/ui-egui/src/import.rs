@@ -256,19 +256,21 @@ pub fn scan_progress(app: &mut LightcraftApp, ctx: &egui::Context) {
     let text = if total == 0 {
         if task.browse { "Reading folder…" } else { "Looking for photos…" }.to_string()
     } else {
-        format!("Reading photos… {done} of {total}")
+        crate::i18n::tr_format!("Reading photos… {done} of {total}", done = done, total = total)
     };
     let mut cancel = false;
-    egui::Window::new("Scanning").title_bar(false).resizable(false).anchor(Align2::CENTER_BOTTOM, [0.0, -80.0]).fixed_size([340.0, 80.0]).show(
-        ctx,
-        |ui| {
+    egui::Window::new(crate::i18n::tr("Scanning"))
+        .title_bar(false)
+        .resizable(false)
+        .anchor(Align2::CENTER_BOTTOM, [0.0, -80.0])
+        .fixed_size([340.0, 80.0])
+        .show(ctx, |ui| {
             ui.label(egui::RichText::new(text).color(t.text));
             ui.add(egui::ProgressBar::new(done as f32 / total.max(1) as f32).desired_width(320.0));
-            let r = ui.button("Cancel");
+            let r = ui.button(crate::i18n::tr("Cancel"));
             register(ui.ctx(), "button:scanCancel", r.rect);
             cancel = r.clicked();
-        },
-    );
+        });
     if cancel {
         // the worker stops at its next file; don't wait for it (a NAS read can take a while)
         task.progress.cancel.store(true, Ordering::Relaxed);
@@ -372,11 +374,11 @@ pub fn tick(app: &mut LightcraftApp, ctx: &egui::Context) {
     }
     let Some(task) = app.import.take() else { return };
     let steps = app.session.undo.len().saturating_sub(task.undo0);
-    let label = format!("Add {} Photo{}", task.imported, if task.imported == 1 { "" } else { "s" });
+    let label = crate::i18n::tr_format!("Add {} Photo{}", task.imported, if task.imported == 1 { "" } else { "s" });
     app.session.merge_undo(steps, &label);
     if task.browse {
         if task.failed > 0 {
-            app.toast(ctx, format!("{} photo{} not readable", task.failed, if task.failed == 1 { "" } else { "s" }));
+            app.toast(ctx, crate::i18n::tr_format!("{} photo{} not readable", task.failed, if task.failed == 1 { "" } else { "s" }));
         }
         return;
     }
@@ -384,18 +386,18 @@ pub fn tick(app: &mut LightcraftApp, ctx: &egui::Context) {
         let _ = app.run("library.select", json!({"ids": [f]}));
     }
     let plural = |n: usize| if n == 1 { "" } else { "s" };
-    let mut msg = format!("Imported {} photo{}", task.imported, plural(task.imported));
+    let mut msg = crate::i18n::tr_format!("Imported {} photo{}", task.imported, plural(task.imported));
     if task.params["mode"] == "move" {
-        msg.push_str(&format!(" · {} moved", task.moved));
+        msg.push_str(&crate::i18n::tr_format!(" · {} moved", task.moved));
         if task.kept > 0 {
             msg.push_str(&format!(" · {} original{} left at the source", task.kept, plural(task.kept)));
         }
     }
     if task.duplicates > 0 {
-        msg.push_str(&format!(" · {} duplicate{} skipped", task.duplicates, if task.duplicates == 1 { "" } else { "s" }));
+        msg.push_str(&crate::i18n::tr_format!(" · {} duplicate{} skipped", task.duplicates, if task.duplicates == 1 { "" } else { "s" }));
     }
     if task.failed > 0 {
-        msg.push_str(&format!(" · {} not readable", task.failed));
+        msg.push_str(&crate::i18n::tr_format!(" · {} not readable", task.failed));
     }
     app.toast(ctx, msg);
 }
@@ -406,13 +408,15 @@ pub fn progress(app: &mut LightcraftApp, ctx: &egui::Context) {
     let t = Tokens::get(ctx);
     let frac = task.done as f32 / task.total.max(1) as f32;
     let text = format!("{} photos… {} of {}", if task.browse { "Reading" } else { "Adding" }, task.done, task.total);
-    egui::Window::new("Importing").title_bar(false).resizable(false).anchor(Align2::CENTER_BOTTOM, [0.0, -80.0]).fixed_size([340.0, 60.0]).show(
-        ctx,
-        |ui| {
+    egui::Window::new(crate::i18n::tr("Importing"))
+        .title_bar(false)
+        .resizable(false)
+        .anchor(Align2::CENTER_BOTTOM, [0.0, -80.0])
+        .fixed_size([340.0, 60.0])
+        .show(ctx, |ui| {
             ui.label(egui::RichText::new(text).color(t.text));
             ui.add(egui::ProgressBar::new(frac).desired_width(320.0));
-        },
-    );
+        });
 }
 
 /// The dialog body: options, then the candidate grid.
@@ -422,15 +426,15 @@ pub fn body(app: &mut LightcraftApp, ui: &mut egui::Ui, d: &mut ImportDialog) {
     let dups = d.candidates.iter().filter(|c| c.duplicate.is_some()).count();
     let sel = d.selected_paths().len();
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(format!("{n} found · {sel} selected")).color(t.text));
+        ui.label(egui::RichText::new(crate::i18n::tr_format!("{n} found · {sel} selected", n = n, sel = sel)).color(t.text));
         if dups > 0 {
-            ui.label(egui::RichText::new(format!("· {dups} already in the library")).color(t.text_dim));
+            ui.label(egui::RichText::new(crate::i18n::tr_format!("· {dups} already in the library", dups = dups)).color(t.text_dim));
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if crate::widgets::text_button(ui, "importNone", "Uncheck All", false).clicked() {
+            if crate::widgets::text_button(ui, "importNone", crate::i18n::tr("Uncheck All"), false).clicked() {
                 d.checked.iter_mut().for_each(|c| *c = false);
             }
-            if crate::widgets::text_button(ui, "importAll", "Check All", false).clicked() {
+            if crate::widgets::text_button(ui, "importAll", crate::i18n::tr("Check All"), false).clicked() {
                 for i in 0..n {
                     d.checked[i] = d.importable(i);
                 }
@@ -462,25 +466,32 @@ pub fn body(app: &mut LightcraftApp, ui: &mut egui::Ui, d: &mut ImportDialog) {
             register(ui.ctx(), "label:importSource", r.rect);
         });
         ui.label(
-            egui::RichText::new("Importing scans the source for photos; it doesn't add the folder to Local (use Local → Browse Folder… to work in a folder without importing).")
+            egui::RichText::new(crate::i18n::tr("Importing scans the source for photos; it doesn't add the folder to Local (use Local → Browse Folder… to work in a folder without importing)."))
                 .color(t.text_dim)
                 .small(),
         );
     }
     field(ui, "Transfer", |ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
-        if crate::widgets::text_button(ui, "importAdd", "Add in place", !d.copy).on_hover_text("Reference the files where they are").clicked() {
+        if crate::widgets::text_button(ui, "importAdd", crate::i18n::tr("Add in place"), !d.copy)
+            .on_hover_text(crate::i18n::tr("Reference the files where they are"))
+            .clicked()
+        {
             d.copy = false;
             d.move_files = false;
         }
         let can_copy = app.session.library.as_ref().is_some_and(|l| l.on_disk) || app.services.pick_folder.is_some();
-        let r = ui.add_enabled_ui(can_copy, |ui| crate::widgets::text_button(ui, "importCopy", "Copy", d.copy && !d.move_files)).inner;
-        if r.on_hover_text("Copy the files (into the library's Originals/, or a folder you choose)").clicked() {
+        let r =
+            ui.add_enabled_ui(can_copy, |ui| crate::widgets::text_button(ui, "importCopy", crate::i18n::tr("Copy"), d.copy && !d.move_files)).inner;
+        if r.on_hover_text(crate::i18n::tr("Copy the files (into the library's Originals/, or a folder you choose)")).clicked() {
             d.copy = true;
             d.move_files = false;
         }
-        let r = ui.add_enabled_ui(can_copy, |ui| crate::widgets::text_button(ui, "importMove", "Move", d.copy && d.move_files)).inner;
-        if r.on_hover_text("Move the files (into the library's Originals/, or a folder you choose), removing them from the source").clicked() {
+        let r =
+            ui.add_enabled_ui(can_copy, |ui| crate::widgets::text_button(ui, "importMove", crate::i18n::tr("Move"), d.copy && d.move_files)).inner;
+        if r.on_hover_text(crate::i18n::tr("Move the files (into the library's Originals/, or a folder you choose), removing them from the source"))
+            .clicked()
+        {
             d.copy = true;
             d.move_files = true;
         }
@@ -505,12 +516,12 @@ pub fn body(app: &mut LightcraftApp, ui: &mut egui::Ui, d: &mut ImportDialog) {
             let shown = if d.destination.trim().is_empty() { "Library Originals".to_string() } else { d.destination.clone() };
             ui.label(egui::RichText::new(shown).color(Tokens::get(ui.ctx()).text_label));
             if app.services.pick_folder.is_some()
-                && crate::widgets::text_button(ui, "importDest", "Choose…", false).clicked()
+                && crate::widgets::text_button(ui, "importDest", crate::i18n::tr("Choose…"), false).clicked()
                 && let Some(f) = app.services.pick_folder.as_mut().and_then(|f| f())
             {
                 d.destination = f;
             }
-            if !d.destination.is_empty() && crate::widgets::text_button(ui, "importDestReset", "Library", false).clicked() {
+            if !d.destination.is_empty() && crate::widgets::text_button(ui, "importDestReset", crate::i18n::tr("Library"), false).clicked() {
                 d.destination.clear();
             }
         });
@@ -557,14 +568,16 @@ pub fn body(app: &mut LightcraftApp, ui: &mut egui::Ui, d: &mut ImportDialog) {
                 None => unknown_tags_warning(ui, &d.folder_template),
             }
             ui.label(
-                egui::RichText::new("Each / starts a folder level; tags are filled in per photo (a level with missing metadata is \"unknown\").")
-                    .color(t.text_dim)
-                    .small(),
+                egui::RichText::new(crate::i18n::tr(
+                    "Each / starts a folder level; tags are filled in per photo (a level with missing metadata is \"unknown\").",
+                ))
+                .color(t.text_dim)
+                .small(),
             );
         }
         if !d.move_files {
             field(ui, "Raw files", |ui| {
-                let r = ui.checkbox(&mut d.dng, "Copy as DNG");
+                let r = ui.checkbox(&mut d.dng, crate::i18n::tr("Copy as DNG"));
                 register(ui.ctx(), "check:importDng", r.rect);
             });
         }
@@ -582,10 +595,12 @@ pub fn body(app: &mut LightcraftApp, ui: &mut egui::Ui, d: &mut ImportDialog) {
         unknown_tags_warning(ui, &d.rename);
         if let Some(example) = example_destination(app, d) {
             let t = Tokens::get(ui.ctx());
-            let r = ui.label(egui::RichText::new(format!("Example: {example}")).color(t.text_dim));
+            let r = ui.label(egui::RichText::new(crate::i18n::tr_format!("Example: {example}", example = example)).color(t.text_dim));
             register(ui.ctx(), "label:importExample", r.rect);
             ui.label(
-                egui::RichText::new("Folders and {date} use the capture time; a photo without one uses today's date.").color(t.text_dim).small(),
+                egui::RichText::new(crate::i18n::tr("Folders and {date} use the capture time; a photo without one uses today's date."))
+                    .color(t.text_dim)
+                    .small(),
             );
         }
     }
@@ -602,11 +617,11 @@ pub fn body(app: &mut LightcraftApp, ui: &mut egui::Ui, d: &mut ImportDialog) {
             None => "None".into(),
         };
         egui::ComboBox::from_id_salt("import-album").selected_text(cur).show_ui(ui, |ui| {
-            if ui.selectable_label(d.album.is_none() && d.new_album.is_empty(), "None").clicked() {
+            if ui.selectable_label(d.album.is_none() && d.new_album.is_empty(), crate::i18n::tr("None")).clicked() {
                 d.album = None;
                 d.new_album.clear();
             }
-            if ui.selectable_label(d.album.is_none() && !d.new_album.is_empty(), "New album…").clicked() {
+            if ui.selectable_label(d.album.is_none() && !d.new_album.is_empty(), crate::i18n::tr("New album…")).clicked() {
                 d.album = None;
                 if d.new_album.is_empty() {
                     d.new_album = "Imported Photos".into();
@@ -627,7 +642,7 @@ pub fn body(app: &mut LightcraftApp, ui: &mut egui::Ui, d: &mut ImportDialog) {
     field(ui, "Preset", |ui| {
         let cur = app.session.presets.iter().find(|p| p.id == d.preset).map(|p| p.name.clone()).unwrap_or_else(|| "None".into());
         egui::ComboBox::from_id_salt("import-preset").selected_text(cur).height(300.0).show_ui(ui, |ui| {
-            if ui.selectable_label(d.preset.is_empty(), "None").clicked() {
+            if ui.selectable_label(d.preset.is_empty(), crate::i18n::tr("None")).clicked() {
                 d.preset.clear();
             }
             for p in &app.session.presets {
@@ -641,7 +656,7 @@ pub fn body(app: &mut LightcraftApp, ui: &mut egui::Ui, d: &mut ImportDialog) {
         field(ui, "Metadata", |ui| {
             let cur = if d.metadata_preset.is_empty() { "None".to_string() } else { d.metadata_preset.clone() };
             egui::ComboBox::from_id_salt("import-metadata").selected_text(cur).show_ui(ui, |ui| {
-                if ui.selectable_label(d.metadata_preset.is_empty(), "None").clicked() {
+                if ui.selectable_label(d.metadata_preset.is_empty(), crate::i18n::tr("None")).clicked() {
                     d.metadata_preset.clear();
                 }
                 for m in &app.session.metadata_presets {
@@ -653,7 +668,7 @@ pub fn body(app: &mut LightcraftApp, ui: &mut egui::Ui, d: &mut ImportDialog) {
         });
     }
     field(ui, "Keywords", |ui| {
-        let r = ui.add(egui::TextEdit::singleline(&mut d.keywords).hint_text("comma, separated").desired_width(f32::INFINITY));
+        let r = ui.add(egui::TextEdit::singleline(&mut d.keywords).hint_text(crate::i18n::tr("comma, separated")).desired_width(f32::INFINITY));
         register(ui.ctx(), "field:importKeywords", r.rect);
     });
 }
@@ -726,7 +741,8 @@ fn candidate_cell(app: &mut LightcraftApp, ui: &mut egui::Ui, d: &mut ImportDial
 pub(crate) fn tag_toggle(ui: &mut egui::Ui, key: &str) -> bool {
     let id = egui::Id::new((key, "tags-open"));
     let mut open = ui.ctx().data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
-    let r = crate::widgets::text_button(ui, &format!("{key}Tags"), "Tags", open).on_hover_text("Show the template tags; click one to insert it");
+    let r = crate::widgets::text_button(ui, &format!("{key}Tags"), crate::i18n::tr("Tags"), open)
+        .on_hover_text(crate::i18n::tr("Show the template tags; click one to insert it"));
     if r.clicked() {
         open = !open;
         ui.ctx().data_mut(|d| d.insert_temp(id, open));
@@ -770,7 +786,9 @@ pub(crate) fn tag_help(ui: &mut egui::Ui, key: &str, text: &mut String, edit_id:
     let t = Tokens::get(ui.ctx());
     egui::Frame::new().fill(t.inset).corner_radius(4.0).inner_margin(6.0).show(ui, |ui| {
         ui.label(
-            egui::RichText::new("Click a tag to insert it. Examples are for IMG_0042.CR3 taken 14 Jan 2026, 05:58:48.").color(t.text_dim).small(),
+            egui::RichText::new(crate::i18n::tr("Click a tag to insert it. Examples are for IMG_0042.CR3 taken 14 Jan 2026, 05:58:48."))
+                .color(t.text_dim)
+                .small(),
         );
         egui::ScrollArea::vertical().id_salt((key, "tags")).max_height(170.0).show(ui, |ui| {
             egui::Grid::new((key, "tag-grid")).num_columns(3).spacing([10.0, 2.0]).show(ui, |ui| {
@@ -848,9 +866,9 @@ pub fn source_summary(sources: &[String]) -> String {
         many => {
             let folders = many.iter().filter(|p| std::path::Path::new(p.as_str()).is_dir()).count();
             match folders {
-                0 => format!("{} files", many.len()),
-                f if f == many.len() => format!("{f} folders (and their subfolders)"),
-                f => format!("{} files and {f} folder{}", many.len() - f, if f == 1 { "" } else { "s" }),
+                0 => crate::i18n::tr_format!("{} files", many.len()),
+                f if f == many.len() => crate::i18n::tr_format!("{f} folders (and their subfolders)", f = f),
+                f => crate::i18n::tr_format!("{} files and {f} folder{}", many.len() - f, if f == 1 { "" } else { "s" }, f = f),
             }
         }
     }

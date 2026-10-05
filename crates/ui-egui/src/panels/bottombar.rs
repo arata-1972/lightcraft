@@ -104,7 +104,13 @@ fn centre(app: &mut LightcraftApp, ui: &mut egui::Ui, full: Rect, from: f32, to:
     let cresp = ui.interact(copy_r, egui::Id::new("copy-settings"), Sense::click());
     register(ui.ctx(), "button:copySettings", copy_r);
     ui.painter().rect_filled(copy_r, 15.0, if cresp.hovered() { t.hover } else { t.canvas });
-    ui.painter().text(copy_r.center(), Align2::CENTER_CENTER, label, t.font(13.0), if active.is_some() { t.text_label } else { t.text_disabled });
+    ui.painter().text(
+        copy_r.center(),
+        Align2::CENTER_CENTER,
+        crate::i18n::tr(label),
+        t.font(13.0),
+        if active.is_some() { t.text_label } else { t.text_disabled },
+    );
     if cresp.clicked() && active.is_some() {
         let _ = if has_clip { app.run("develop.paste", json!({})) } else { app.run("develop.copy", json!({})) };
         let msg = if has_clip { "Settings pasted" } else { "Edit settings copied" };
@@ -168,7 +174,7 @@ fn right_side(app: &mut LightcraftApp, ui: &mut egui::Ui, full: Rect) -> f32 {
             Zoom::Fill => "Fill".to_string(),
             Zoom::Percent(p) => format!("{p}%"),
         };
-        let zr = crate::widgets::dropdown(&mut child, "zoom", &zoom_label, t.font(13.0), t.text_label);
+        let zr = crate::widgets::dropdown(&mut child, "zoom", crate::i18n::tr(&zoom_label), t.font(13.0), t.text_label);
         egui::Popup::menu(&zr).show(|ui| {
             for (label, z) in [
                 ("Fit", Zoom::Fit),
@@ -185,7 +191,13 @@ fn right_side(app: &mut LightcraftApp, ui: &mut egui::Ui, full: Rect) -> f32 {
             }
         });
         child.add_space(6.0);
-        let cz = crate::widgets::dropdown(&mut child, "clickZoom", &format!("Click {}:1", app.ui.click_zoom / 100), t.font(13.0), t.text_label);
+        let cz = crate::widgets::dropdown(
+            &mut child,
+            "clickZoom",
+            &crate::i18n::tr_format!("Click {}:1", app.ui.click_zoom / 100),
+            t.font(13.0),
+            t.text_label,
+        );
         egui::Popup::menu(&cz).show(|ui| {
             for pct in crate::state::CLICK_ZOOMS {
                 if ui.selectable_label(app.ui.click_zoom == pct, format!("{}:1", pct / 100)).clicked() {
@@ -216,7 +228,7 @@ fn sort_menu(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     use lightcraft_catalog::GroupBy;
     use lightcraft_catalog::SortKey::*;
     let cur = app.session.sort;
-    ui.label(egui::RichText::new("Sort by").weak());
+    ui.label(egui::RichText::new(crate::i18n::tr("Sort by")).weak());
     for (label, key, k) in [
         ("Capture Date", CaptureDate, "captureDate"),
         ("Import Date", ImportDate, "importDate"),
@@ -225,19 +237,19 @@ fn sort_menu(app: &mut LightcraftApp, ui: &mut egui::Ui) {
         ("Rating", Rating, "rating"),
         ("File Size", FileSize, "fileSize"),
     ] {
-        if ui.selectable_label(cur.key == key, label).clicked() {
+        if ui.selectable_label(cur.key == key, crate::i18n::tr(label)).clicked() {
             let _ = app.run("library.sort", json!({"key": k}));
         }
     }
     ui.separator();
-    if ui.selectable_label(cur.ascending, "Ascending").clicked() {
+    if ui.selectable_label(cur.ascending, crate::i18n::tr("Ascending")).clicked() {
         let _ = app.run("library.sort", json!({"ascending": true}));
     }
-    if ui.selectable_label(!cur.ascending, "Descending").clicked() {
+    if ui.selectable_label(!cur.ascending, crate::i18n::tr("Descending")).clicked() {
         let _ = app.run("library.sort", json!({"ascending": false}));
     }
     ui.separator();
-    ui.label(egui::RichText::new("Group by date").weak());
+    ui.label(egui::RichText::new(crate::i18n::tr("Group by date")).weak());
     for (label, g, k) in [
         ("Automatic", GroupBy::Auto, "auto"),
         ("Day", GroupBy::Day, "day"),
@@ -245,7 +257,7 @@ fn sort_menu(app: &mut LightcraftApp, ui: &mut egui::Ui) {
         ("Year", GroupBy::Year, "year"),
         ("None", GroupBy::None, "none"),
     ] {
-        if ui.selectable_label(cur.group == g, label).clicked() {
+        if ui.selectable_label(cur.group == g, crate::i18n::tr(label)).clicked() {
             let _ = app.run("library.sort", json!({"group": k}));
         }
     }

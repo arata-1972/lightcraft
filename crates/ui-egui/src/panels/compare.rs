@@ -263,10 +263,10 @@ pub fn show_compare(app: &mut LightcraftApp, ui: &mut egui::Ui) {
             app.ui.zoom = if app.ui.zoom == Zoom::Fit { Zoom::Percent(100) } else { Zoom::Fit };
         }
         resp.context_menu(|ui| {
-            if ui.button("Swap").clicked() {
+            if ui.button(crate::i18n::tr("Swap")).clicked() {
                 let _ = swap(app);
             }
-            if ui.button("Make Candidate the Select").clicked() {
+            if ui.button(crate::i18n::tr("Make Candidate the Select")).clicked() {
                 let _ = make_select(app);
             }
             ui.separator();
@@ -321,7 +321,7 @@ pub fn show_survey(app: &mut LightcraftApp, ui: &mut egui::Ui) {
         // remove from the survey (deselect) on hover
         if resp.hovered() && photos.len() > 1 {
             let xr = Rect::from_min_size(pos2(img.right() - 26.0, img.top() + 6.0), vec2(20.0, 20.0));
-            let xresp = ui.interact(xr, egui::Id::new(("survey-x", id.0)), Sense::click()).on_hover_text("Remove from survey");
+            let xresp = ui.interact(xr, egui::Id::new(("survey-x", id.0)), Sense::click()).on_hover_text(crate::i18n::tr("Remove from survey"));
             ui.painter().circle_filled(xr.center(), 10.0, Color32::from_black_alpha(if xresp.hovered() { 230 } else { 160 }));
             paint(ui.painter(), xr.shrink(4.0), Icon::Close, t.text);
             if xresp.clicked() {
@@ -331,8 +331,11 @@ pub fn show_survey(app: &mut LightcraftApp, ui: &mut egui::Ui) {
         resp.context_menu(|ui| super::grid::context_menu(app, ui, *id));
     }
     let n = photos.len();
-    let msg =
-        if app.session.selection.ids.len() > SURVEY_MAX { format!("Showing {n} of {}", app.session.selection.ids.len()) } else { String::new() };
+    let msg = if app.session.selection.ids.len() > SURVEY_MAX {
+        crate::i18n::tr_format!("Showing {n} of {}", app.session.selection.ids.len(), n = n)
+    } else {
+        String::new()
+    };
     if !msg.is_empty() {
         ui.painter().text(pos2(canvas.right() - 16.0, canvas.top() + 10.0), Align2::RIGHT_TOP, msg, t.font(12.0), t.text_dim);
     }
@@ -357,7 +360,7 @@ pub fn show_reference(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     app.image_rect = Some(img);
     pan(app, &resp, img);
     lresp.context_menu(|ui| {
-        if ui.button("Clear Reference").clicked() {
+        if ui.button(crate::i18n::tr("Clear Reference")).clicked() {
             app.ui.reference = None;
             app.ui.view = ViewMode::Detail;
         }

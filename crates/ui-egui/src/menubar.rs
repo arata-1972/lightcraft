@@ -43,6 +43,15 @@ impl MenuNode {
     }
 }
 
+/// User-defined names in parameterized menus are data, not message keys.
+pub fn display_item_label<'a>(id: &str, params: &Value, label: &'a str) -> &'a str {
+    if matches!(id, "metadata.applyPreset" | "album.addPhotos" | "label.applySet") || (id == "app.export" && params.get("preset").is_some()) {
+        label
+    } else {
+        crate::i18n::tr(label)
+    }
+}
+
 /// Top-level menus in order (the macOS app menu is added by the host).
 pub const MENUS: &[&str] = &["File", "Edit", "View", "Photo", "Window", "Help"];
 
@@ -296,11 +305,15 @@ pub fn checked(app: &LightcraftApp, id: &str) -> Option<bool> {
 fn live_label(app: &LightcraftApp, id: &str, label: &str) -> String {
     let n = app.session.selection.ids.len();
     match id {
-        "edit.undo" => app.session.undo.last().map(|e| format!("Undo {}", e.label)).unwrap_or_else(|| "Undo".into()),
-        "edit.redo" => app.session.redo.last().map(|e| format!("Redo {}", e.label)).unwrap_or_else(|| "Redo".into()),
-        "photo.delete" if n > 1 => format!("Delete {n} Photos"),
-        "photo.virtualCopy" if n > 1 => format!("Create {n} Virtual Copies"),
-        "dialog.rename" if n > 1 => format!("Rename {n} Photos…"),
+        "edit.undo" => {
+            app.session.undo.last().map(|e| crate::i18n::tr_format!("Undo {}", crate::i18n::tr(&e.label))).unwrap_or_else(|| "Undo".into())
+        }
+        "edit.redo" => {
+            app.session.redo.last().map(|e| crate::i18n::tr_format!("Redo {}", crate::i18n::tr(&e.label))).unwrap_or_else(|| "Redo".into())
+        }
+        "photo.delete" if n > 1 => crate::i18n::tr_format!("Delete {n} Photos", n = n),
+        "photo.virtualCopy" if n > 1 => crate::i18n::tr_format!("Create {n} Virtual Copies", n = n),
+        "dialog.rename" if n > 1 => crate::i18n::tr_format!("Rename {n} Photos…", n = n),
         _ => label.to_string(),
     }
 }
@@ -464,14 +477,21 @@ fn expanded(app: &LightcraftApp, name: &str) -> Option<Vec<MenuNode>> {
                 .map(|(f, label)| item("library.selectBy", json!({"flag": f}), label, None, true, None))
                 .collect();
             v.push(MenuNode::Separator);
-            v.extend(
-                (1..=5u8).map(|r| item("library.selectBy", json!({"rating": r}), format!("{} and higher", "★".repeat(r as usize)), None, true, None)),
-            );
+            v.extend((1..=5u8).map(|r| {
+                item("library.selectBy", json!({"rating": r}), crate::i18n::tr_format!("{} and higher", "★".repeat(r as usize)), None, true, None)
+            }));
             v.push(item("library.selectBy", json!({"rating": 0, "ratingOp": "eq"}), "Unrated", None, true, None));
             v.push(MenuNode::Separator);
             v.extend(lightcraft_catalog::ColorLabel::ALL.iter().map(|l| {
                 let name = format!("{l:?}");
-                item("library.selectBy", json!({"label": name.to_lowercase()}), format!("{name} Label"), None, true, None)
+                item(
+                    "library.selectBy",
+                    json!({"label": name.to_lowercase()}),
+                    crate::i18n::tr_format!("{name} Label", name = name),
+                    None,
+                    true,
+                    None,
+                )
             }));
             v
         }
@@ -595,22 +615,6 @@ pub fn menu_bar(app: &LightcraftApp) -> Vec<(String, Vec<MenuNode>)> {
         }
         bar.push((title.to_string(), tidy(items)));
     }
-    fn translate(nodes: &mut [MenuNode], language: crate::i18n::Language) {
-        for node in nodes {
-            match node {
-                MenuNode::Submenu { label, children } => {
-                    *label = language.tr(label).to_string();
-                    translate(children, language);
-                }
-                MenuNode::Item { label, .. } => *label = language.tr(label).to_string(),
-                MenuNode::Separator => {}
-            }
-        }
-    }
-    for (title, nodes) in &mut bar {
-        *title = app.ui.language.tr(title).to_string();
-        translate(nodes, app.ui.language);
-    }
     bar
 }
 
@@ -664,9 +668,9 @@ pub fn shortcut_text(sc: &str, mac: bool) -> String {
 const TITLE_GAP: f32 = 24.0;
 
 /// Width of the in-window menu bar's titles.
-pub fn bar_width(ui: &egui::Ui, language: crate::i18n::Language) -> f32 {
+pub fn bar_width(ui: &egui::Ui) -> f32 {
     let t = crate::theme::Tokens::get(ui.ctx());
-    MENUS.iter().map(|m| ui.painter().layout_no_wrap(language.tr(m).to_string(), t.font(13.0), t.text).size().x + TITLE_GAP).sum::<f32>()
+    MENUS.iter().map(|m| ui.painter().layout_no_wrap(crate::i18n::tr(m).to_string(), t.font(13.0), t.text).size().x + TITLE_GAP).sum::<f32>()
 }
 
 /// The in-window menu bar (hosts without a native one): one dropdown per menu, or a single
@@ -675,8 +679,10 @@ pub fn show_in_window(app: &mut LightcraftApp, ui: &mut egui::Ui, max_width: f32
     let t = crate::theme::Tokens::get(ui.ctx());
     let bar = menu_bar(app);
     let font = t.font(13.0);
-    let widths: Vec<f32> =
-        bar.iter().map(|(title, _)| ui.painter().layout_no_wrap(title.clone(), font.clone(), t.text).size().x + TITLE_GAP).collect();
+    let widths: Vec<f32> = bar
+        .iter()
+        .map(|(title, _)| ui.painter().layout_no_wrap(crate::i18n::tr(title).to_string(), font.clone(), t.text).size().x + TITLE_GAP)
+        .collect();
     let total: f32 = widths.iter().sum();
     let mut clicked: Option<(String, Value)> = None;
     let start = ui.cursor().left();
@@ -684,18 +690,18 @@ pub fn show_in_window(app: &mut LightcraftApp, ui: &mut egui::Ui, max_width: f32
     if total <= max_width {
         let saved = ui.spacing().item_spacing.x;
         ui.spacing_mut().item_spacing.x = TITLE_GAP;
-        for (index, (title, items)) in bar.iter().enumerate() {
-            let r = ui.add(egui::Button::new(egui::RichText::new(title).font(font.clone()).color(t.text_label)).frame(false));
-            crate::widgets::register(ui.ctx(), format!("menu:{}", MENUS.get(index).copied().unwrap_or(title.as_str())), r.rect);
+        for (title, items) in &bar {
+            let r = ui.add(egui::Button::new(egui::RichText::new(crate::i18n::tr(title)).font(font.clone()).color(t.text_label)).frame(false));
+            crate::widgets::register(ui.ctx(), format!("menu:{title}"), r.rect);
             egui::Popup::menu(&r).show(|ui| nodes_ui(ui, items, mac, &mut clicked));
         }
         ui.spacing_mut().item_spacing.x = saved;
     } else {
-        let r = ui.add(egui::Button::new(egui::RichText::new(app.ui.language.tr("Menu")).font(font.clone()).color(t.text_label)).frame(false));
+        let r = ui.add(egui::Button::new(egui::RichText::new(crate::i18n::tr("Menu")).font(font.clone()).color(t.text_label)).frame(false));
         crate::widgets::register(ui.ctx(), "menu:all", r.rect);
         egui::Popup::menu(&r).show(|ui| {
             for (title, items) in &bar {
-                ui.menu_button(title, |ui| nodes_ui(ui, items, mac, &mut clicked));
+                ui.menu_button(crate::i18n::tr(title), |ui| nodes_ui(ui, items, mac, &mut clicked));
             }
         });
     }
@@ -713,11 +719,11 @@ fn nodes_ui(ui: &mut egui::Ui, nodes: &[MenuNode], mac: bool, clicked: &mut Opti
                 ui.separator();
             }
             MenuNode::Submenu { label, children } => {
-                ui.menu_button(format!("      {label}"), |ui| nodes_ui(ui, children, mac, clicked));
+                ui.menu_button(format!("      {}", crate::i18n::tr(label)), |ui| nodes_ui(ui, children, mac, clicked));
             }
             MenuNode::Item { id, params, label, shortcut, enabled, checked } => {
                 // a gutter for check marks, like native menus
-                let mut b = egui::Button::new(format!("      {label}"));
+                let mut b = egui::Button::new(format!("      {}", display_item_label(id, params, label)));
                 if let Some(sc) = shortcut {
                     b = b.shortcut_text(shortcut_text(sc, mac));
                 }

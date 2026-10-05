@@ -26,7 +26,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
             let (hr, _) = ui.allocate_exact_size(vec2(ui.available_width(), 46.0), Sense::hover());
-            ui.painter().text(pos2(hr.left() + 24.0, hr.center().y + 2.0), Align2::LEFT_CENTER, "Presets", t.semibold(15.0), t.text);
+            ui.painter().text(pos2(hr.left() + 24.0, hr.center().y + 2.0), Align2::LEFT_CENTER, crate::i18n::tr("Presets"), t.semibold(15.0), t.text);
             let mut hdr = ui.new_child(
                 egui::UiBuilder::new()
                     .max_rect(Rect::from_min_max(pos2(hr.right() - 80.0, hr.top()), hr.right_bottom()))
@@ -38,14 +38,14 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
             }
             let more = icon_button(&mut hdr, "presetMore", Icon::More, vec2(28.0, 28.0), false, true, "More preset options");
             egui::Popup::menu(&more).show(|ui| {
-                let r = ui.checkbox(&mut app.ui.preset_thumbs, "Show Thumbnails");
+                let r = ui.checkbox(&mut app.ui.preset_thumbs, crate::i18n::tr("Show Thumbnails"));
                 register(ui.ctx(), "presetMenu:thumbnails", r.rect);
                 ui.separator();
-                if ui.button("Import Presets…").clicked() {
+                if ui.button(crate::i18n::tr("Import Presets…")).clicked() {
                     let _ = app.run("file.importPresets", json!({}));
                 }
                 let any_user = app.session.presets.iter().any(|p| !p.builtin);
-                if ui.add_enabled(any_user, egui::Button::new("Export User Presets…")).clicked() {
+                if ui.add_enabled(any_user, egui::Button::new(crate::i18n::tr("Export User Presets…"))).clicked() {
                     let _ = app.run("file.exportPresets", json!({}));
                 }
             });
@@ -99,7 +99,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
                         ui.data_mut(|d| d.insert_temp(open_id, !open));
                     }
                     resp.context_menu(|ui| {
-                        if ui.button("Export Group…").clicked() {
+                        if ui.button(crate::i18n::tr("Export Group…")).clicked() {
                             let _ = app.run("file.exportPresets", json!({"group": g}));
                         }
                     });
@@ -141,12 +141,12 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
                         if resp.hovered()
                             && let Some(s) = look
                         {
-                            app.hover_preview = Some(HoverPreview { label: format!("Preset: {name}"), settings: s });
+                            app.hover_preview = Some(HoverPreview { label: crate::i18n::tr_format!("Preset: {name}", name = name), settings: s });
                         }
                         if resp.clicked() {
                             let _ = app.run("preset.apply", json!({"id": pid, "amount": 100}));
                             ui.data_mut(|d| d.insert_temp(amt_id, (pid.clone(), 100.0)));
-                            app.toast(ui.ctx(), format!("Preset: {name}"));
+                            app.toast(ui.ctx(), crate::i18n::tr_format!("Preset: {name}", name = name));
                         }
                         let (builtin, group) = (pr.builtin, pr.group.clone());
                         resp.context_menu(|ui| {
@@ -157,13 +157,16 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
                                 return;
                             }
                             ui.separator();
-                            if ui.add_enabled(app.session.active().is_some(), egui::Button::new("Update with Current Settings")).clicked() {
+                            if ui
+                                .add_enabled(app.session.active().is_some(), egui::Button::new(crate::i18n::tr("Update with Current Settings")))
+                                .clicked()
+                            {
                                 match app.run("preset.update", json!({"id": pid})) {
                                     Ok(_) => app.toast(ui.ctx(), format!("Updated “{name}”")),
                                     Err(e) => app.toast(ui.ctx(), e),
                                 }
                             }
-                            if ui.button("Rename…").clicked() {
+                            if ui.button(crate::i18n::tr("Rename…")).clicked() {
                                 crate::panels::dialogs::prompt(
                                     app,
                                     "Rename Preset",
@@ -174,7 +177,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
                                     "name",
                                 );
                             }
-                            ui.menu_button("Move to Group", |ui| {
+                            ui.menu_button(crate::i18n::tr("Move to Group"), |ui| {
                                 let mut groups: Vec<String> = app.session.presets.iter().filter(|p| !p.builtin).map(|p| p.group.clone()).collect();
                                 groups.sort();
                                 groups.dedup();
@@ -183,7 +186,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
                                         let _ = app.run("preset.move", json!({"id": pid, "group": g}));
                                     }
                                 }
-                                if ui.button("New Group…").clicked() {
+                                if ui.button(crate::i18n::tr("New Group…")).clicked() {
                                     crate::panels::dialogs::prompt(
                                         app,
                                         "Move Preset to New Group",
@@ -196,7 +199,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
                                 }
                             });
                             ui.separator();
-                            if ui.button("Delete Preset").clicked() {
+                            if ui.button(crate::i18n::tr("Delete Preset")).clicked() {
                                 let _ = app.run("preset.delete", json!({"id": pid}));
                             }
                         });

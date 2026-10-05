@@ -19,7 +19,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
             let mut sw = 640.0f32.min(full.width() - 460.0).max(200.0);
             if !app.native_menu {
                 // leave room for the in-window menus left of the (centred) search field
-                let menus_right = full.left() + 140.0 + crate::menubar::bar_width(ui, app.ui.language) + 24.0;
+                let menus_right = full.left() + 140.0 + crate::menubar::bar_width(ui) + 24.0;
                 sw = sw.min(2.0 * (full.center().x - menus_right)).max(200.0);
             }
             let search_left = full.center().x - sw / 2.0;
@@ -59,7 +59,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
                 ui.new_child(egui::UiBuilder::new().max_rect(sr.shrink2(vec2(10.0, 4.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
             let empty = app.ui.search.is_empty();
             if empty && !focused {
-                let g = child.painter().layout_no_wrap("Search Photos".into(), t.font(13.5), t.text_dim);
+                let g = child.painter().layout_no_wrap(crate::i18n::tr("Search Photos").into(), t.font(13.5), t.text_dim);
                 let w = g.size().x + 24.0;
                 let x0 = sr.center().x - w / 2.0;
                 paint(child.painter(), Rect::from_min_size(pos2(x0, sr.center().y - 8.0), vec2(16.0, 16.0)), Icon::Search, t.text_dim);
@@ -102,7 +102,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
                 ui.painter().text(c, Align2::CENTER_CENTER, active.to_string(), t.semibold(9.5), t.canvas);
             }
             let fresp = fresp.on_hover_text(if active > 0 {
-                format!("Filter bar — {active} active filter{}", if active == 1 { "" } else { "s" })
+                crate::i18n::tr_format!("Filter bar — {active} active filter{}", if active == 1 { "" } else { "s" }, active = active)
             } else {
                 "Filter bar".into()
             });
@@ -113,10 +113,12 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
             let mut x = full.right() - 18.0;
             // saving is failing: the cloud icon turns into a warning until a save succeeds
             let unsaved = app.session.unsaved().map(|(n, e)| {
-                format!(
+                crate::i18n::tr_format!(
                     "{n} change{} saved in memory but not written to disk: {e}\nLightCraft retries automatically; quitting now would lose {}.",
                     if n == 1 { "" } else { "s" },
-                    if n == 1 { "it" } else { "them" }
+                    if n == 1 { "it" } else { "them" },
+                    e = e,
+                    n = n
                 )
             });
             let cloud_tip = unsaved.as_deref().unwrap_or("Local library — no cloud account needed");

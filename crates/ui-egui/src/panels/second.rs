@@ -26,7 +26,13 @@ fn body(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     crate::widgets::register(ui.ctx(), "view:secondWindow", area);
     ui.allocate_rect(area, egui::Sense::hover());
     let Some(id) = app.session.active() else {
-        ui.painter().text(area.center(), egui::Align2::CENTER_CENTER, "No photo selected", egui::FontId::proportional(14.0), Color32::GRAY);
+        ui.painter().text(
+            area.center(),
+            egui::Align2::CENTER_CENTER,
+            crate::i18n::tr("No photo selected"),
+            egui::FontId::proportional(14.0),
+            Color32::GRAY,
+        );
         return;
     };
     // a render sized for this window

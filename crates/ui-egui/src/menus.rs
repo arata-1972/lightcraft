@@ -149,10 +149,10 @@ pub const UI_COMMANDS: &[UiCommand] = &[
 fn panel(app: &mut LightcraftApp, ctx: &egui::Context, p: RightPanel, name: &str) {
     if app.ui.right == p {
         app.ui.right = RightPanel::None;
-        app.toast(ctx, format!("{name} Off"));
+        app.toast(ctx, crate::i18n::tr_format!("{name} Off", name = name));
     } else {
         app.ui.right = p;
-        app.toast(ctx, format!("{name} On"));
+        app.toast(ctx, crate::i18n::tr_format!("{name} On", name = name));
         if p.is_edit_tool() && !matches!(app.ui.view, ViewMode::Detail) {
             app.ui.view = ViewMode::Detail;
         }
@@ -865,7 +865,7 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
                 (
                     "GPU".to_string(),
                     gpu.unwrap_or_else(|| match lightcraft_engine::gpu::unavailable_reason() {
-                        Some(why) => format!("none (CPU rendering): {why}"),
+                        Some(why) => crate::i18n::tr_format!("none (CPU rendering): {why}", why = why),
                         None => "none (CPU rendering)".into(),
                     }),
                 ),
@@ -1059,8 +1059,14 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
                 let failed = v["failed"].as_array().map_or(0, Vec::len);
                 let mut msg = match (n, failed) {
                     (0, 0) => "No new presets".to_string(),
-                    (n, 0) => format!("Imported {n} preset{}", if n == 1 { "" } else { "s" }),
-                    (n, f) => format!("Imported {n} preset{}, {f} file{} not readable", if n == 1 { "" } else { "s" }, if f == 1 { "" } else { "s" }),
+                    (n, 0) => crate::i18n::tr_format!("Imported {n} preset{}", if n == 1 { "" } else { "s" }, n = n),
+                    (n, f) => crate::i18n::tr_format!(
+                        "Imported {n} preset{}, {f} file{} not readable",
+                        if n == 1 { "" } else { "s" },
+                        if f == 1 { "" } else { "s" },
+                        f = f,
+                        n = n
+                    ),
                 };
                 // settings with no counterpart here (the other editor's profiles, masks…)
                 let mut skipped: Vec<&str> = v["imported"]
@@ -1105,7 +1111,7 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
             }
             let r = app.session.execute("preset.export", &params).map_err(|e| e.to_string());
             if let Ok(v) = &r {
-                app.toast(&ctx, format!("Exported {} preset{}", v["count"], if v["count"] == 1 { "" } else { "s" }));
+                app.toast(&ctx, crate::i18n::tr_format!("Exported {} preset{}", v["count"], if v["count"] == 1 { "" } else { "s" }));
             }
             return Some(r);
         }
@@ -1124,9 +1130,9 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
             if let Ok(v) = &r {
                 let n = v["imported"].as_array().map_or(0, Vec::len);
                 let failed = v["failed"].as_array().map_or(0, Vec::len);
-                let mut msg = format!("Imported {n} point curve preset{}", if n == 1 { "" } else { "s" });
+                let mut msg = crate::i18n::tr_format!("Imported {n} point curve preset{}", if n == 1 { "" } else { "s" }, n = n);
                 if failed > 0 {
-                    msg += &format!(", {failed} file{} not readable", if failed == 1 { "" } else { "s" });
+                    msg += &crate::i18n::tr_format!(", {failed} file{} not readable", if failed == 1 { "" } else { "s" }, failed = failed);
                 }
                 app.toast(&ctx, msg);
             }
@@ -1147,7 +1153,7 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
             }
             let r = app.session.execute("curve.exportPresets", &params).map_err(|e| e.to_string());
             if let Ok(v) = &r {
-                app.toast(&ctx, format!("Exported {} point curve preset{}", v["count"], if v["count"] == 1 { "" } else { "s" }));
+                app.toast(&ctx, crate::i18n::tr_format!("Exported {} point curve preset{}", v["count"], if v["count"] == 1 { "" } else { "s" }));
             }
             return Some(r);
         }

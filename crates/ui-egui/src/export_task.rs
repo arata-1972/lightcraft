@@ -75,12 +75,13 @@ pub fn poll(app: &mut LightcraftApp, ctx: &egui::Context) {
                     let ok = files.iter().filter(|f| f.get("path").is_some()).count();
                     let failed: Vec<&Value> = files.iter().filter(|f| f.get("error").is_some()).collect();
                     let skipped = files.iter().filter(|f| f.get("skipped").is_some()).count();
-                    let mut m = format!("Exported {ok} of {total} photo{}", if total == 1 { "" } else { "s" });
+                    let mut m =
+                        crate::i18n::tr_format!("Exported {ok} of {total} photo{}", if total == 1 { "" } else { "s" }, ok = ok, total = total);
                     if skipped > 0 {
-                        m += &format!(" · {skipped} skipped (file exists)");
+                        m += &crate::i18n::tr_format!(" · {skipped} skipped (file exists)", skipped = skipped);
                     }
                     if let Some(first) = failed.first() {
-                        m += &format!(" · {} failed: {}", failed.len(), first["error"].as_str().unwrap_or("error"));
+                        m += &crate::i18n::tr_format!(" · {} failed: {}", failed.len(), first["error"].as_str().unwrap_or("error"));
                     }
                     if cancelled {
                         m += " · cancelled";
@@ -96,14 +97,17 @@ pub fn poll(app: &mut LightcraftApp, ctx: &egui::Context) {
             let (done, current) = task.progress.lock().map(|g| g.clone()).unwrap_or_default();
             let (total, cancel) = (task.total, task.cancel.clone());
             let t = Tokens::get(ctx);
-            egui::Window::new("Exporting")
+            egui::Window::new(crate::i18n::tr("Exporting"))
                 .title_bar(false)
                 .resizable(false)
                 .anchor(Align2::LEFT_BOTTOM, [16.0, -56.0])
                 .fixed_size([300.0, 64.0])
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(format!("Exporting {} of {total}", (done + 1).min(total))).color(t.text));
+                        ui.label(
+                            egui::RichText::new(crate::i18n::tr_format!("Exporting {} of {total}", (done + 1).min(total), total = total))
+                                .color(t.text),
+                        );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let stopping = cancel.load(Ordering::Relaxed);
                             if crate::widgets::text_button(ui, "exportCancel", if stopping { "Stopping…" } else { "Cancel" }, false).clicked() {

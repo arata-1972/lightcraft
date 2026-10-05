@@ -33,7 +33,7 @@ fn filter(app: &mut LightcraftApp, patch: Value) {
 /// A small label before a group of controls.
 fn caption(ui: &mut egui::Ui, text: &str) {
     let t = Tokens::get(ui.ctx());
-    ui.label(egui::RichText::new(text).font(t.font(12.0)).color(t.text_dim));
+    ui.label(egui::RichText::new(crate::i18n::tr(text)).font(t.font(12.0)).color(t.text_dim));
 }
 
 /// A square toggle with an icon or a colour swatch.
@@ -59,13 +59,13 @@ fn toggle(ui: &mut egui::Ui, id: &str, on: bool, tip: &str, draw: impl FnOnce(&e
             t.icon
         },
     );
-    resp.on_hover_text(tip)
+    resp.on_hover_text(crate::i18n::tr(tip))
 }
 
 /// A dropdown showing `current`; `items` are (label, filter patch, selected).
 fn picker(app: &mut LightcraftApp, ui: &mut egui::Ui, id: &str, current: &str, active: bool, items: Vec<(String, Value, bool)>) {
     let t = Tokens::get(ui.ctx());
-    let r = crate::widgets::dropdown(ui, &format!("filter-{id}"), current, t.font(12.5), if active { t.text } else { t.text_label });
+    let r = crate::widgets::dropdown(ui, &format!("filter-{id}"), crate::i18n::tr(current), t.font(12.5), if active { t.text } else { t.text_label });
     if active {
         ui.painter().rect_stroke(r.rect.expand(2.0), 4.0, Stroke::new(1.0, t.accent.gamma_multiply(0.7)), StrokeKind::Outside);
     }
@@ -73,7 +73,7 @@ fn picker(app: &mut LightcraftApp, ui: &mut egui::Ui, id: &str, current: &str, a
     egui::Popup::menu(&r).show(|ui| {
         egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
             for (label, patch, sel) in &items {
-                if ui.selectable_label(*sel, label).clicked() {
+                if ui.selectable_label(*sel, crate::i18n::tr(label)).clicked() {
                     chosen = Some(patch.clone());
                 }
             }
@@ -260,19 +260,19 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
     // save / clear
     ui.add_space(14.0);
     let filtering = app.session.filter != Default::default();
-    let save = ui.add_enabled(filtering, egui::Button::new(egui::RichText::new("Save as Smart Album…").font(t.font(12.5))));
+    let save = ui.add_enabled(filtering, egui::Button::new(egui::RichText::new(crate::i18n::tr("Save as Smart Album…")).font(t.font(12.5))));
     register(ui.ctx(), "button:filterSave", save.rect);
     if save.clicked() {
         let _ = app.run("dialog.newSmartAlbum", json!({}));
     }
-    let clear = ui.add_enabled(filtering, egui::Button::new(egui::RichText::new("Clear").font(t.font(12.5))));
+    let clear = ui.add_enabled(filtering, egui::Button::new(egui::RichText::new(crate::i18n::tr("Clear")).font(t.font(12.5))));
     register(ui.ctx(), "button:filterClear", clear.rect);
     if clear.clicked() {
         app.ui.search.clear();
         let _ = app.run("library.clearFilter", json!({}));
     }
     // filter presets: apply one, save the current filter, delete
-    let presets = ui.button(egui::RichText::new("Presets ▾").font(t.font(12.5)));
+    let presets = ui.button(egui::RichText::new(crate::i18n::tr("Presets ▾")).font(t.font(12.5)));
     register(ui.ctx(), "button:filterPresets", presets.rect);
     egui::Popup::menu(&presets).show(|ui| {
         let names: Vec<String> = app.session.filter_presets.iter().map(|f| f.name.clone()).collect();
@@ -282,16 +282,16 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui) {
                 let _ = app.run("filter.applyPreset", json!({"name": n}));
             }
             r.context_menu(|ui| {
-                if ui.button("Delete Preset").clicked() {
+                if ui.button(crate::i18n::tr("Delete Preset")).clicked() {
                     let _ = app.run("filter.deletePreset", json!({"name": n}));
                 }
             });
         }
         if names.is_empty() {
-            ui.label(egui::RichText::new("No filter presets yet").color(t.text_dim));
+            ui.label(egui::RichText::new(crate::i18n::tr("No filter presets yet")).color(t.text_dim));
         }
         ui.separator();
-        if ui.add_enabled(filtering, egui::Button::new("Save Current Filter as Preset…")).clicked() {
+        if ui.add_enabled(filtering, egui::Button::new(crate::i18n::tr("Save Current Filter as Preset…"))).clicked() {
             crate::panels::dialogs::prompt(app, "Save Filter Preset", "Preset name", "", "filter.savePreset", json!({}), "name");
         }
     });

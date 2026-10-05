@@ -110,17 +110,16 @@ pub fn install_fonts(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
     fonts.font_data.insert("Inter".into(), Arc::new(FontData::from_static(include_bytes!("../../../assets/fonts/Inter-Regular.ttf"))));
     fonts.font_data.insert("Inter-SemiBold".into(), Arc::new(FontData::from_static(include_bytes!("../../../assets/fonts/Inter-SemiBold.ttf"))));
+    fonts.font_data.insert("Japanese".into(), Arc::new(FontData::from_static(include_bytes!("../../../assets/fonts/BIZUDPGothic-Regular.ttf"))));
+    fonts.font_data.insert("Japanese-Bold".into(), Arc::new(FontData::from_static(include_bytes!("../../../assets/fonts/BIZUDPGothic-Bold.ttf"))));
     let fallback: Vec<String> = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
-    let mut prop = vec!["Inter".to_string()];
+    let mut prop = vec!["Inter".to_string(), "Japanese".to_string()];
     prop.extend(fallback.clone());
     fonts.families.insert(FontFamily::Proportional, prop);
-    let mut semi = vec!["Inter-SemiBold".to_string()];
+    let mut semi = vec!["Inter-SemiBold".to_string(), "Japanese-Bold".to_string()];
     semi.extend(fallback);
     fonts.families.insert(FontFamily::Name(FONT_SEMIBOLD.into()), semi);
-    fonts.font_data.insert("japanese".into(), Arc::new(FontData::from_static(lightcraft_engine::export::WATERMARK_JAPANESE_FONT)));
-    for stack in fonts.families.values_mut() {
-        stack.push("japanese".into());
-    }
+    fonts.families.entry(FontFamily::Monospace).or_default().push("Japanese".into());
     ctx.set_fonts(fonts);
 }
 

@@ -18,8 +18,8 @@ const TAIL: f32 = 170.0;
 /// "14 of 120 photos" when a filter narrows the source, else "14 photos".
 pub fn count_text(matching: usize, total: Option<usize>, filtering: bool) -> String {
     match total {
-        Some(t) if filtering && t != matching => format!("{matching} of {t} photos"),
-        _ => format!("{matching} photos"),
+        Some(t) if filtering && t != matching => crate::i18n::tr_format!("{matching} of {t} photos", matching = matching, t = t),
+        _ => crate::i18n::tr_format!("{matching} photos", matching = matching),
     }
 }
 
@@ -53,7 +53,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, chips: &[FilterChip]) {
         let text_r = Rect::from_min_max(r.min, pos2(r.right() - 22.0, r.max.y));
         ui.painter().with_clip_rect(text_r).text(pos2(r.left() + 10.0, r.center().y), egui::Align2::LEFT_CENTER, &c.label, font.clone(), t.text);
         let xr = Rect::from_center_size(pos2(r.right() - 12.0, r.center().y), vec2(18.0, 18.0));
-        let resp = ui.interact(xr, egui::Id::new(("filter-chip-x", i)), Sense::click()).on_hover_text("Remove this filter");
+        let resp = ui.interact(xr, egui::Id::new(("filter-chip-x", i)), Sense::click()).on_hover_text(crate::i18n::tr("Remove this filter"));
         register(ui.ctx(), format!("chip:{i}"), xr);
         let col = if resp.hovered() { t.text } else { t.text_dim };
         let m = 3.5;
@@ -80,7 +80,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, chips: &[FilterChip]) {
         let more = crate::widgets::text_button(&mut child, "chipsMore", &format!("+{} more", hidden.len()), false);
         egui::Popup::menu(&more).show(|ui| {
             for c in hidden {
-                if ui.button(format!("{}  ✕", c.label)).on_hover_text("Remove this filter").clicked() {
+                if ui.button(format!("{}  ✕", c.label)).on_hover_text(crate::i18n::tr("Remove this filter")).clicked() {
                     let _ = app.run("library.filter", c.clear.clone());
                     if c.clear.get("text").is_some() {
                         app.ui.search.clear();
@@ -89,7 +89,7 @@ pub fn show(app: &mut LightcraftApp, ui: &mut egui::Ui, chips: &[FilterChip]) {
             }
         });
     }
-    if crate::widgets::text_button(&mut child, "chipsClearAll", "Clear all", false).clicked() {
+    if crate::widgets::text_button(&mut child, "chipsClearAll", crate::i18n::tr("Clear all"), false).clicked() {
         app.ui.search.clear();
         let _ = app.run("library.clearFilter", json!({}));
     }

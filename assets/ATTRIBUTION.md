@@ -21,6 +21,8 @@ covers a whole directory), or if a licence file referenced in the Licence column
 | `docs/images/*.jpg` (UI) | LightCraft application screenshots | LightCraft contributors | original work (captured with `docs/showcase/`) | MIT OR Apache-2.0 | 2026-09-30 | n/a |
 | `docs/brand/` (artcraft-logo and artcraft-mark, SVG and PNG) | ArtCraft wordmark and mark | ArtCraft Team | original work (https://getartcraft.com/) | ArtCraft trademark, see `docs/brand/LICENSE-brand.txt` (not open source) | 2026-10-01 | none |
 
+| `assets/fonts/BIZUDPGothic-*.ttf` | BIZ UDPGothic (Regular, Bold) | Morisawa / BIZ UDGothic Project Authors | https://github.com/googlefonts/morisawa-biz-ud-gothic/tree/18934af56b9c003ca58c54bffbf226848cb11032 | SIL Open Font License 1.1 (`assets/fonts/OFL-BIZUDGothic.txt`) | 2026-10-05 | none |
+
 Notes
 - Fonts authored or published by Adobe (Source Sans/Serif/Code, Source Han, …) are not used, even though some are
   OFL-licensed: the asset rule excludes anything from Adobe. Source Sans 3 was removed on 2026-09-30 and replaced by Inter.

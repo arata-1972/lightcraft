@@ -1,24 +1,27 @@
-//! Interface translations. Command ids, document text and file names remain stable.
-//! Untranslated labels fall back to English so coverage can grow incrementally.
+//! Presentation-only localization. Command ids, user names and catalog data remain unchanged.
+use std::{cell::Cell, collections::BTreeMap, sync::OnceLock};
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
+use serde::{Deserialize, Serialize};
+
+include!(concat!(env!("OUT_DIR"), "/ja-formats.rs"));
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Language {
     #[default]
+    #[serde(rename = "en")]
     En,
+    #[serde(rename = "ja")]
     Ja,
 }
 
 impl Language {
     pub const ALL: [Self; 2] = [Self::En, Self::Ja];
-
     pub fn name(self) -> &'static str {
         match self {
             Self::En => "English",
             Self::Ja => "日本語",
         }
     }
-
     pub fn parse(code: &str) -> Option<Self> {
         match code {
             "en" => Some(Self::En),
@@ -26,129 +29,134 @@ impl Language {
             _ => None,
         }
     }
-
-    pub fn tr(self, text: &str) -> &str {
-        if self == Self::Ja
-            && let Some((_, japanese)) = JAPANESE.iter().find(|(english, _)| *english == text)
-        {
-            return japanese;
-        }
-        text
+    pub fn tr(self, source: &str) -> &str {
+        if self == Self::Ja { japanese().get(source).map(String::as_str).unwrap_or(source) } else { source }
     }
 }
 
-const JAPANESE: &[(&str, &str)] = &[
-    ("Photo", "写真"),
-    ("Import Photos…", "写真を読み込み…"),
-    ("Detail", "詳細"),
-    ("Photo Grid", "写真グリッド"),
-    ("Square Grid", "正方形グリッド"),
-    ("Object", "オブジェクト"),
-    ("Effect", "効果"),
-    ("Settings…", "環境設定…"),
-    ("Image", "画像"),
-    ("Layer", "レイヤー"),
-    ("Type", "書式"),
-    ("Select", "選択"),
-    ("Filter", "フィルター"),
-    ("Window", "ウィンドウ"),
-    ("Language", "表示言語"),
-    ("Save As…", "別名で保存…"),
-    ("Exit", "終了"),
-    ("New…", "新規…"),
-    ("New", "新規"),
-    ("Horizontal", "横書き"),
-    ("Vertical", "縦書き"),
-    ("Orientation", "組み方向"),
-    ("Layers", "レイヤー"),
-    ("History", "履歴"),
-    ("Properties", "プロパティ"),
-    ("Color", "カラー"),
-    ("Brush Settings", "ブラシ設定"),
-    ("Tools", "ツール"),
-    ("Options", "オプション"),
-    ("Zoom In", "ズームイン"),
-    ("Zoom Out", "ズームアウト"),
-    ("Fit on Screen", "画面に合わせる"),
-    ("Copy", "コピー"),
-    ("Cut", "切り取り"),
-    ("Paste", "貼り付け"),
-    ("Select All", "すべて選択"),
-    ("Deselect", "選択を解除"),
-    ("Export", "書き出し"),
-    ("Export As…", "形式を指定して書き出し…"),
-    ("Search…", "検索…"),
-    ("Theme", "テーマ"),
-    ("Menu", "メニュー"),
-    ("File", "ファイル"),
-    ("Edit", "編集"),
-    ("Pages", "ページ"),
-    ("View", "表示"),
-    ("Help", "ヘルプ"),
-    ("Preferences", "環境設定"),
-    ("Preferences…", "環境設定…"),
-    ("Interface language", "表示言語"),
-    ("Open…", "開く…"),
-    ("New blank PDF", "空白の PDF を作成"),
-    ("Create PDF from file…", "ファイルから PDF を作成…"),
-    ("Create PDF from images…", "画像から PDF を作成…"),
-    ("Create PDF from clipboard", "クリップボードから PDF を作成"),
-    ("Combine files…", "ファイルを結合…"),
-    ("Save", "保存"),
-    ("Save as…", "別名で保存…"),
-    ("Close file", "ファイルを閉じる"),
-    ("Close all", "すべて閉じる"),
-    ("Revert", "保存済みの状態に戻す"),
-    ("Print…", "印刷…"),
-    ("Document properties…", "文書のプロパティ…"),
-    ("Undo", "取り消し"),
-    ("Redo", "やり直し"),
-    ("Find…", "検索…"),
-    ("Advanced search…", "高度な検索…"),
-    ("Copy pages", "ページをコピー"),
-    ("Cut pages", "ページを切り取り"),
-    ("Paste pages", "ページを貼り付け"),
-    ("Fit visible", "表示範囲に合わせる"),
-    ("Marquee zoom", "範囲指定ズーム"),
-    ("Take a snapshot", "スナップショットを作成"),
-    ("Full screen mode", "全画面表示"),
-    ("Read mode", "閲覧モード"),
-    ("Switch light / dark theme", "明るい／暗いテーマを切り替え"),
-    ("Comments panel", "コメントパネル"),
-    ("Form fields panel", "フォームフィールドパネル"),
-    ("Clear form", "フォームをクリア"),
-    ("Find tools and commands…", "ツールとコマンドを検索…"),
-    ("Zoom", "ズーム"),
-    ("Actual size", "実際のサイズ"),
-    ("Zoom to page level", "ページ全体を表示"),
-    ("Fit to width", "幅に合わせる"),
-    ("Display theme", "表示テーマ"),
-    ("Side panels", "サイドパネル"),
-    ("OK", "OK"),
-];
+thread_local! {
+    static LANGUAGE: Cell<Language> = const { Cell::new(Language::En) };
+}
+
+pub fn default_language() -> Language {
+    if std::env::var("LIGHTCRAFT_LANGUAGE").as_deref() == Ok("ja") { Language::Ja } else { Language::En }
+}
+
+pub fn set_language(language: Language) {
+    LANGUAGE.with(|value| value.set(language));
+}
+
+pub fn is_japanese() -> bool {
+    LANGUAGE.with(|value| value.get() == Language::Ja)
+}
+
+fn japanese() -> &'static BTreeMap<String, String> {
+    static MESSAGES: OnceLock<BTreeMap<String, String>> = OnceLock::new();
+    MESSAGES.get_or_init(|| {
+        serde_json::from_str(include_str!("../locales/ja.json")).unwrap_or_else(|error| {
+            log::error!("Invalid Japanese message catalog: {error}");
+            BTreeMap::new()
+        })
+    })
+}
+
+/// Translate a built-in display label, preserving unknown labels verbatim.
+/// Never call this on editable user text, filenames or command identifiers.
+pub fn tr(source: &str) -> &str {
+    if is_japanese() { japanese().get(source).map(String::as_str).unwrap_or(source) } else { source }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn language_setting_persists() {
-        let state = crate::state::UiState { language: Language::Ja, ..Default::default() };
-        let saved = serde_json::to_string(&state).unwrap();
-        let restored: crate::state::UiState = serde_json::from_str(&saved).unwrap();
-        assert_eq!(restored.language, Language::Ja);
-        assert_eq!(crate::state::UiState::default().language, Language::En);
+    fn catalog_is_valid_and_contains_core_workflows() {
+        let messages: BTreeMap<String, String> = serde_json::from_str(include_str!("../locales/ja.json")).unwrap();
+        for key in ["Import Photos…", "Export…", "Exposure", "White Balance", "Settings", "Language"] {
+            assert!(messages.get(key).is_some_and(|value| !value.is_empty() && value != key), "{key}");
+        }
     }
 
     #[test]
-    fn translations_are_unique_and_preserve_unknown_text() {
-        for (i, (en, ja)) in JAPANESE.iter().enumerate() {
-            assert!(!ja.is_empty());
-            assert!(JAPANESE.iter().take(i).all(|(other, _)| en != other));
-            assert_eq!(Language::En.tr(en), *en);
+    fn language_switches_and_unknown_text_survives() {
+        set_language(Language::Ja);
+        assert_eq!(tr("Exposure"), "露出");
+        assert_eq!(tr("my-photo.jpg"), "my-photo.jpg");
+        assert_eq!(tr("develop.set"), "develop.set");
+        assert_eq!(crate::menubar::display_item_label("album.addPhotos", &serde_json::json!({"id": 1}), "Color"), "Color");
+        assert_eq!(crate::menubar::display_item_label("app.export", &serde_json::json!({"preset": "Color"}), "Color"), "Color");
+        assert_eq!(crate::menubar::display_item_label("view.photoGrid", &serde_json::Value::Null, "Color"), "カラー");
+        set_language(Language::En);
+        assert_eq!(tr("Exposure"), "Exposure");
+    }
+
+    #[test]
+    fn translated_formats_preserve_counts_and_remove_english_plural_suffixes() {
+        set_language(Language::Ja);
+        assert_eq!(tr_format!("{n} photo{}", "s", n = 12), "12枚");
+        assert_eq!(tr_format!("Exported {ok} of {total} photo{}", "s", ok = 4, total = 12), "12枚中4枚を書き出しました");
+        set_language(Language::En);
+        assert_eq!(tr_format!("{n} photo{}", "s", n = 12), "12 photos");
+    }
+
+    #[test]
+    fn preferences_round_trip_and_old_settings_remain_readable() {
+        let old: crate::state::UiState = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.language, Language::En);
+        let settings = crate::state::UiState { language: Language::Ja, ..old };
+        let saved = serde_json::to_string(&settings).unwrap();
+        let restored: crate::state::UiState = serde_json::from_str(&saved).unwrap();
+        assert_eq!(restored.language, Language::Ja);
+    }
+
+    #[test]
+    fn japanese_is_painted_and_both_font_weights_cover_the_catalog() {
+        let ctx = egui::Context::default();
+        crate::theme::install_fonts(&ctx);
+        let mut app = crate::LightcraftApp::new(lightcraft_engine::Session::with_demo(), Default::default());
+        app.ui.language = Language::Ja;
+        app.ui.left_panel = true;
+        let mut text = String::new();
+        fn collect(shape: &egui::epaint::Shape, text: &mut String) {
+            match shape {
+                egui::epaint::Shape::Text(shape) => {
+                    text.push_str(&shape.galley.job.text);
+                    text.push('\n');
+                }
+                egui::epaint::Shape::Vec(shapes) => shapes.iter().for_each(|shape| collect(shape, text)),
+                _ => {}
+            }
         }
-        assert_eq!(Language::Ja.tr("File"), "ファイル");
-        assert_eq!(Language::Ja.tr("日本語の文書.pdf"), "日本語の文書.pdf");
-        assert_eq!(Language::parse("xx"), None);
+        for frame in 0..4 {
+            let input = crate::headless::HeadlessView::raw_input(egui::vec2(1600.0, 1000.0), 1.0, frame as f64 / 60.0, vec![]);
+            let mut out = ctx.run_ui(input, |ui| {
+                app.logic(ui.ctx());
+                app.ui(ui);
+            });
+            // This assertion inspects shapes without a renderer; discard texture uploads explicitly.
+            out.textures_delta.clear();
+            text.clear();
+            for shape in out.shapes {
+                collect(&shape.shape, &mut text);
+            }
+        }
+        assert!(text.contains("マイフォト"), "{text}");
+        assert!(text.contains("すべての写真"), "{text}");
+        ctx.fonts_mut(|fonts| {
+            for family in [egui::FontFamily::Proportional, egui::FontFamily::Name(crate::theme::FONT_SEMIBOLD.into())] {
+                let font = egui::FontId::new(13.0, family);
+                for message in japanese().values() {
+                    for ch in message.chars().filter(|ch| !ch.is_whitespace()) {
+                        assert!(fonts.has_glyph(&font, ch), "Missing glyph {ch} in {message}");
+                    }
+                }
+            }
+        });
+        // Locale affects presentation only: command ids remain the same.
+        let ids = |app: &crate::LightcraftApp| crate::menus::menu_entries(app).into_iter().map(|entry| entry.id).collect::<Vec<_>>();
+        let japanese_ids = ids(&app);
+        set_language(Language::En);
+        assert_eq!(japanese_ids, ids(&app));
     }
 }
