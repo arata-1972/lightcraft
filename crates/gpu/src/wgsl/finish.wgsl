@@ -400,6 +400,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (yl > 1e-9) {
         d = c * o / yl;
     }
+    if (pu(F_CAMERA_RGB_TONE) != 0u) {
+        d = vec3<f32>(tone_apply(max(c.x, 0.0)), tone_apply(max(c.y, 0.0)), tone_apply(max(c.z, 0.0)));
+    }
     let mx = max(d.x, max(d.y, d.z));
     if (mx > 1.0) {
         let t = clamp((mx - 1.0) / max(mx - o, 1e-6), 0.0, 1.0);

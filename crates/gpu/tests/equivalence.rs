@@ -41,6 +41,8 @@ fn camera_tone_and_relative_wb() {
     s.wb.mode = WbMode::Custom;
     s.wb.temp = 8000.0;
     check("camera tone edited", &src, &info, &s, &RenderRequest::fit(320, 240));
+    let calibrated = SourceInfo { camera_rgb_tone: true, sensor_long_edge: 6192, ..info };
+    check("calibrated channel tone", &src, &calibrated, &s, &RenderRequest::fit(320, 240));
 }
 
 fn scene(i: usize, w: usize, h: usize) -> Arc<Rgb32f> {

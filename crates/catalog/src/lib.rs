@@ -268,6 +268,28 @@ impl Catalog {
     pub fn photos(&self) -> impl Iterator<Item = &Arc<Photo>> {
         self.photos.values()
     }
+
+    /// Schema/default-policy migration: only untouched legacy Sony factory defaults change.
+    /// Custom edits, import presets and browsed Local records are preserved. Replay happens
+    /// first, so a durable user edit always wins over this idempotent default upgrade.
+    pub(crate) fn upgrade_arw_defaults(&mut self) {
+        for photo in self.photos.values_mut() {
+            if !photo.relative_wb()
+                || photo.import_look.is_some()
+                || photo.edited.is_some()
+                || photo.local
+                || photo.develop.wb.mode != lightcraft_develop::WbMode::AsShot
+            {
+                continue;
+            }
+            let mut legacy = DevelopSettings::for_raw(photo.develop.wb.temp, photo.develop.wb.tint);
+            legacy.optics.lens_profile = photo.embedded_lens.is_some();
+            if *photo.develop == legacy {
+                let defaults = photo.camera_defaults();
+                Arc::make_mut(photo).develop = Arc::new(defaults);
+            }
+        }
+    }
     pub fn len(&self) -> usize {
         self.photos.len()
     }

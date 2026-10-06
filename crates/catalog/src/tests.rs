@@ -4,6 +4,31 @@ use lightcraft_develop::DevelopSettings;
 
 use super::*;
 
+#[test]
+fn legacy_sony_defaults_upgrade_without_overwriting_custom_edits() {
+    let mut catalog = Catalog::new();
+    for (id, custom) in [(1, false), (2, true)] {
+        let mut p = Photo::new(PhotoId(id), Source::Demo { scene: 0 }, "test.ARW", "ARW", 4128, 6192, "2026-10-06");
+        p.kind = MediaKind::Raw;
+        p.meta.iso = Some(1600);
+        let mut old = DevelopSettings::for_raw(6500.0, 0.0);
+        if custom {
+            old.light.exposure = 0.5;
+        }
+        p.develop = Arc::new(old);
+        catalog.apply(Op::AddPhoto { photo: Box::new(p) }).unwrap();
+    }
+    let edited = catalog.photo(PhotoId(2)).unwrap().develop.clone();
+    catalog.upgrade_arw_defaults();
+    let upgraded = catalog.photo(PhotoId(1)).unwrap();
+    assert!(upgraded.develop.detail.nr_luminance > 0.0);
+    assert!(!upgraded.is_edited());
+    assert_eq!(catalog.photo(PhotoId(2)).unwrap().develop, edited);
+    let first = catalog.clone();
+    catalog.upgrade_arw_defaults();
+    assert_eq!(catalog, first);
+}
+
 fn photo(c: &mut Catalog, name: &str, date: &str) -> PhotoId {
     let id = c.alloc_photo_id();
     let mut p = Photo::new(id, Source::Demo { scene: 1 }, name, "JPEG", 6000, 4000, "2026-09-30T10:00:00");

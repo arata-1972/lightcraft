@@ -25,7 +25,14 @@ pub fn file_name(p: &Photo) -> String {
 const HEADER_MAX: u64 = 4096;
 
 /// Encode a source image (and the decoder's camera tone curve, if any) as a smart preview.
+#[cfg(test)]
 pub fn encode(img: &Rgb32f, tone: Option<&CameraTone>) -> Result<Vec<u8>, String> {
+    encode_source(img, &lightcraft_pipeline::SourceInfo { camera_tone: tone.copied(), ..Default::default() })
+}
+
+/// Preserve channel-response interpretation and original sensor scale with the source pixels.
+pub fn encode_source(img: &Rgb32f, info: &lightcraft_pipeline::SourceInfo) -> Result<Vec<u8>, String> {
+    let tone = info.camera_tone.as_ref();
     // scale so all but the brightest 0.05 % fit into 0..1
     let mut lum: Vec<f32> = img.data.iter().map(|c| c[0].max(c[1]).max(c[2])).filter(|v| v.is_finite()).collect();
     let scale = if lum.is_empty() {
@@ -57,6 +64,8 @@ pub fn encode(img: &Rgb32f, tone: Option<&CameraTone>) -> Result<Vec<u8>, String
     if let Some(t) = tone {
         head["tone"] = serde_json::to_value(t).map_err(|e| e.to_string())?;
     }
+    head["camera_rgb_tone"] = serde_json::json!(info.camera_rgb_tone);
+    head["sensor_long_edge"] = serde_json::json!(info.sensor_long_edge);
     out.extend_from_slice(head.to_string().as_bytes());
     out.push(b'\n');
     out.extend_from_slice(&jpg);
@@ -190,7 +199,13 @@ pub fn is_valid(path: &Path) -> bool {
 /// Load the proxy at `path`.
 pub fn load(path: &Path) -> Result<crate::media::DecodedSource, String> {
     let b = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    decode(&b).map(|(image, camera_tone)| crate::media::DecodedSource { image: Arc::new(image), info: None, camera_tone })
+    let (image, camera_tone) = decode(&b)?;
+    let rest = b.strip_prefix(MAGIC).ok_or("not a smart preview")?;
+    let nl = rest.iter().position(|b| *b == b'\n').ok_or("bad smart preview")?;
+    let head: serde_json::Value = serde_json::from_slice(&rest[..nl]).map_err(|e| e.to_string())?;
+    let camera_rgb_tone = camera_tone.is_some() && head["camera_rgb_tone"].as_bool().unwrap_or(false);
+    let sensor_long_edge = head["sensor_long_edge"].as_u64().filter(|v| *v <= 64_000_000).unwrap_or(0) as usize;
+    Ok(crate::media::DecodedSource { image: Arc::new(image), info: None, camera_tone, camera_rgb_tone, sensor_long_edge })
 }
 
 #[cfg(test)]
@@ -274,6 +289,19 @@ mod tests {
         assert_eq!(loaded.camera_tone, Some(tone));
         let header = lightcraft_pipeline::SourceInfo { raw: true, ..Default::default() };
         assert_eq!(loaded.info_or(header).camera_tone, Some(tone));
+        let native_info = lightcraft_pipeline::SourceInfo {
+            raw: true,
+            relative_wb: true,
+            camera_rgb_tone: true,
+            sensor_long_edge: 6192,
+            camera_tone: Some(tone),
+            ..Default::default()
+        };
+        std::fs::write(&path, encode_source(&img, &native_info).unwrap()).unwrap();
+        let native_loaded = load(&path).unwrap().info_or(header);
+        assert!(native_loaded.camera_rgb_tone);
+        assert_eq!(native_loaded.sensor_long_edge, 6192);
+        assert_eq!(native_loaded.camera_tone, Some(tone));
         // a hostile curve (reversing knots) is ignored, not trusted
         let nl = MAGIC.len() + bytes[MAGIC.len()..].iter().position(|b| *b == b'\n').unwrap();
         let mut head: serde_json::Value = serde_json::from_slice(&bytes[MAGIC.len()..nl]).unwrap();

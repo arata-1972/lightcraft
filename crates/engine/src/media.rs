@@ -26,7 +26,7 @@ use lightcraft_raster::{Histogram, Rgb32f, Rgba8};
 use serde::{Deserialize, Serialize};
 
 /// Bump when the pipeline's output changes, to invalidate cached thumbnails.
-pub const RENDER_CACHE_VERSION: u64 = 6;
+pub const RENDER_CACHE_VERSION: u64 = 7;
 
 /// Thumbnails render at one of these long edges (so window/cell size changes reuse the cache).
 pub const THUMB_SIZES: [usize; 4] = [128, 256, 384, 512];
@@ -79,17 +79,24 @@ pub struct DecodedSource {
     /// A smart preview's stored camera tone curve: the one decoder fact its pixels need that the
     /// catalog's header facts lack (used when `info` is `None`).
     pub camera_tone: Option<lightcraft_pipeline::tone::CameraTone>,
+    pub camera_rgb_tone: bool,
+    pub sensor_long_edge: usize,
 }
 
 impl DecodedSource {
     pub fn new(image: Arc<Rgb32f>, info: Option<SourceInfo>) -> Self {
-        DecodedSource { image, info, camera_tone: None }
+        DecodedSource { image, info, camera_tone: None, camera_rgb_tone: false, sensor_long_edge: 0 }
     }
 
     /// What to render these pixels against: the decoder's facts, else `header` (the catalog's)
     /// with any stored camera tone curve.
     pub fn info_or(&self, header: SourceInfo) -> SourceInfo {
-        self.info.unwrap_or(SourceInfo { camera_tone: self.camera_tone.or(header.camera_tone), ..header })
+        self.info.unwrap_or(SourceInfo {
+            camera_tone: self.camera_tone.or(header.camera_tone),
+            camera_rgb_tone: self.camera_rgb_tone || header.camera_rgb_tone,
+            sensor_long_edge: self.sensor_long_edge.max(header.sensor_long_edge),
+            ..header
+        })
     }
 }
 

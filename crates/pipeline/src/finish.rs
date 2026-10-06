@@ -153,6 +153,7 @@ pub struct FinishParams {
     /// A LUT profile and its amount (0..2), applied to the display-encoded colour.
     pub lut: Option<(std::sync::Arc<crate::lut::Lut3d>, f32)>,
     pub tone: ToneMap,
+    pub camera_rgb_tone: bool,
     pub ops: ColorOps,
     /// Calibration: primaries matrix (row-major, linear Rec.2020) and shadows tint (−1..1).
     pub calib: Option<[[f32; 3]; 3]>,
@@ -219,6 +220,7 @@ impl FinishParams {
         });
         let calibration = s.section_enabled("calibration");
         FinishParams {
+            camera_rgb_tone: info.raw && info.camera_rgb_tone,
             calib: if calibration { crate::colorops::calibration_matrix(&s.calibration) } else { None },
             shadow_tint: if calibration { (s.calibration.shadows_tint / 100.0) as f32 } else { 0.0 },
             tone: if let Some(curve) = info.camera_tone.as_ref().filter(|_| info.raw) {
@@ -482,7 +484,13 @@ pub(crate) fn finish_with<T: Copy + Default + Send>(
             // --- tone map on luminance, highlight desaturation
             let yl = luminance_2020(c);
             let o = tone.apply(yl);
-            let mut d = if yl > 1e-9 { c.map(|v| v * o / yl) } else { [0.0; 3] };
+            let mut d = if fp.camera_rgb_tone {
+                c.map(|v| tone.apply(v.max(0.0)))
+            } else if yl > 1e-9 {
+                c.map(|v| v * o / yl)
+            } else {
+                [0.0; 3]
+            };
             let mx = d[0].max(d[1]).max(d[2]);
             if mx > 1.0 {
                 let t = ((mx - 1.0) / (mx - o).max(1e-6)).clamp(0.0, 1.0);
