@@ -13,6 +13,7 @@ pub struct LinearRaw {
     pub pixels: Pixels,
     pub linear_proxy: Pixels,
     pub display_proxy: Pixels,
+    pub response: Option<Vec<[f32; 3]>>,
 }
 
 pub fn decode(bytes: &[u8], max_edge: usize) -> Result<LinearRaw, String> {
@@ -34,8 +35,9 @@ pub fn decode(bytes: &[u8], max_edge: usize) -> Result<LinearRaw, String> {
 mod macos {
     use super::{LinearRaw, Pixels};
     use objc2::{
+        ClassType,
         encode::{Encoding, RefEncode},
-        msg_send,
+        msg_send, msg_send_id,
         rc::{Retained, autoreleasepool},
         runtime::{AnyClass, AnyObject},
     };
@@ -128,9 +130,71 @@ mod macos {
                 let linear = filter.outputImage().ok_or("RAW decoder produced no linear image")?;
                 let linear_proxy = render(&context, &linear, 96, &colour_space)?;
                 let pixels = render(&context, &linear, max_edge, &colour_space)?;
-                Ok(LinearRaw { pixels, linear_proxy, display_proxy })
+                let response = match response(bytes, &context, &colour_space) {
+                    Ok(response) => Some(response),
+                    Err(e) => {
+                        if std::env::var_os("LIGHTCRAFT_PROFILE").is_some() {
+                            eprintln!("[profile] native RAW response unavailable: {e}");
+                        }
+                        None
+                    }
+                };
+                Ok(LinearRaw { pixels, linear_proxy, display_proxy, response })
             }
         })
+    }
+
+    /// Probe the decoder's downstream response with a synthetic RGB chart. The black mask
+    /// makes CIBlendWithMask output our chart instead of its RAW input. Calibration and WB
+    /// remain in the source; no photograph, embedded preview or private profile is sampled.
+    unsafe fn response(bytes: &[u8], context: &CIContext, cs: &ColourSpace) -> Result<Vec<[f32; 3]>, String> {
+        // SAFETY: synchronous framework calls on locally retained objects; chart/data own bounded
+        // copies. The documented orientation property is uint32_t. The measurement owns a separate decoder and cannot mutate the photo decoder.
+        unsafe {
+            let data = NSData::with_bytes(bytes);
+            let hint = NSString::from_str("com.sony.arw-raw-image");
+            let filter = CIRAWFilter::filterWithImageData_identifierHint(&data, Some(&hint)).ok_or("RAW response decoder unavailable")?;
+            let _: () = msg_send![&*filter, setOrientation: 1u32];
+            filter.setExposure(0.0);
+            filter.setLuminanceNoiseReductionAmount(0.0);
+            filter.setColorNoiseReductionAmount(0.0);
+            filter.setSharpnessAmount(0.0);
+            filter.setContrastAmount(0.0);
+            filter.setDetailAmount(0.0);
+            filter.setLocalToneMapAmount(0.0);
+            filter.setLensCorrectionEnabled(false);
+            let n = 33usize;
+            let mut bytes = Vec::with_capacity(n * n * n * 16);
+            let value = |i: usize| 0.001f32 * (((1.0f32 + 16.0 / 0.001).ln() * i as f32 / 32.0).exp() - 1.0);
+            for b in 0..n {
+                for g in 0..n {
+                    for r in 0..n {
+                        for v in [value(r), value(g), value(b), 1.0] {
+                            bytes.extend_from_slice(&v.to_ne_bytes());
+                        }
+                    }
+                }
+            }
+            let data = NSData::with_bytes(&bytes);
+            let chart: Option<Retained<CIImage>> = msg_send_id![CIImage::class(), imageWithBitmapData: &*data, bytesPerRow: n*16, size: NSSize::new(n as f64,(n*n) as f64), format: kCIFormatRGBAf, colorSpace: cs.0.cast::<CGColorSpace>()];
+            let mut black = vec![0u8; 12];
+            black.extend_from_slice(&1.0f32.to_ne_bytes());
+            let mask_data = NSData::with_bytes(&black);
+            let mask: Option<Retained<CIImage>> = msg_send_id![CIImage::class(), imageWithBitmapData: &*mask_data, bytesPerRow: 16usize, size: NSSize::new(1.0,1.0), format: kCIFormatRGBAf, colorSpace: cs.0.cast::<CGColorSpace>()];
+            let chart = chart.ok_or("RAW chart construction failed")?;
+            let mask = mask.ok_or("RAW mask construction failed")?.imageByClampingToExtent();
+            let f = CIFilter::filterWithName(&NSString::from_str("CIBlendWithMask")).ok_or("RAW response filter unavailable")?;
+            let _: () = msg_send![&*f, setValue: &*chart, forKey: &*NSString::from_str("inputBackgroundImage")];
+            let _: () = msg_send![&*f, setValue: &*mask, forKey: &*NSString::from_str("inputMaskImage")];
+            filter.setLinearSpaceFilter(Some(&f));
+            let image = filter.outputImage().ok_or("RAW response unavailable")?;
+            let image = image.imageByCroppingToRect(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(n as f64, (n * n) as f64)));
+            let p = render(context, &image, n * n, cs)?;
+            if (p.width, p.height) != (n, n * n) {
+                return Err(format!("unexpected RAW response dimensions: {}x{}", p.width, p.height));
+            }
+            Ok(p.rgb)
+        }
     }
 
     unsafe fn render(context: &CIContext, image: &CIImage, edge: usize, cs: &ColourSpace) -> Result<Pixels, String> {
@@ -193,6 +257,10 @@ mod tests {
         assert_eq!(larger.pixels.width.max(larger.pixels.height), 1200);
         assert_eq!(small.linear_proxy.rgb, larger.linear_proxy.rgb);
         assert_eq!(small.display_proxy.rgb, larger.display_proxy.rgb);
+        let response = small.response.as_ref().unwrap();
+        assert!(response.first().unwrap().iter().all(|v| v.abs() < 1e-5));
+        assert!(response.last().unwrap().iter().all(|v| *v > 0.9));
+        assert_eq!(small.response, larger.response);
         let maximum = larger.pixels.rgb.iter().flatten().copied().fold(0.0f32, f32::max);
         eprintln!("native scene-linear maximum: {maximum}");
         assert!(maximum > 1.0, "linear highlights must not be baked/clipped to display white");

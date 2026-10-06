@@ -22,7 +22,7 @@ pub fn file_name(p: &Photo) -> String {
 }
 
 /// The most header [`is_valid`] reads (the JSON line before the JPEG).
-const HEADER_MAX: u64 = 4096;
+const HEADER_MAX: u64 = 3 * 1024 * 1024;
 
 /// Encode a source image (and the decoder's camera tone curve, if any) as a smart preview.
 #[cfg(test)]
@@ -60,9 +60,12 @@ pub fn encode_source(img: &Rgb32f, info: &lightcraft_pipeline::SourceInfo) -> Re
     )
     .map_err(|e| e.to_string())?;
     let mut out = MAGIC.to_vec();
-    let mut head = serde_json::json!({"w": img.width, "h": img.height, "scale": scale});
+    let mut head = serde_json::json!({"w": img.width, "h": img.height, "scale": scale, "source_version": crate::media::RENDER_CACHE_VERSION});
     if let Some(t) = tone {
         head["tone"] = serde_json::to_value(t).map_err(|e| e.to_string())?;
+    }
+    if let Some(response) = &info.camera_response {
+        head["camera_response"] = serde_json::to_value(response).map_err(|e| e.to_string())?;
     }
     head["camera_rgb_tone"] = serde_json::json!(info.camera_rgb_tone);
     head["sensor_long_edge"] = serde_json::json!(info.sensor_long_edge);
@@ -77,7 +80,8 @@ pub fn encode_source(img: &Rgb32f, info: &lightcraft_pipeline::SourceInfo) -> Re
 pub fn decode(bytes: &[u8]) -> Result<(Rgb32f, Option<CameraTone>), String> {
     let rest = bytes.strip_prefix(MAGIC).ok_or("not a smart preview")?;
     let nl = rest.iter().position(|b| *b == b'\n').ok_or("bad smart preview")?;
-    let head: serde_json::Value = serde_json::from_slice(&rest[..nl]).map_err(|e| e.to_string())?;
+    let header = rest.get(..nl).filter(|h| h.len() <= HEADER_MAX as usize).ok_or("oversized smart preview header")?;
+    let head: serde_json::Value = serde_json::from_slice(header).map_err(|e| e.to_string())?;
     let scale = head["scale"].as_f64().unwrap_or(1.0) as f32;
     let tone = head.get("tone").and_then(|t| serde_json::from_value::<CameraTone>(t.clone()).ok());
     let d = lightcraft_codecs::decode(&rest[nl + 1..], Default::default()).map_err(|e| e.to_string())?;
@@ -196,16 +200,40 @@ pub fn is_valid(path: &Path) -> bool {
     f.seek(SeekFrom::End(-2)).is_ok() && f.read_exact(&mut end).is_ok() && end == [0xFF, 0xD9]
 }
 
+/// Existing proxies remain usable offline; an explicit rebuild refreshes older source
+/// interpretation rather than retaining a structurally valid but outdated camera response.
+pub fn is_current(path: &Path) -> bool {
+    use std::io::Read;
+    if !is_valid(path) {
+        return false;
+    }
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut bytes = Vec::new();
+    if file.take(HEADER_MAX).read_to_end(&mut bytes).is_err() {
+        return false;
+    }
+    bytes
+        .strip_prefix(MAGIC)
+        .and_then(|b| b.split(|c| *c == b'\n').next())
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
+        .is_some_and(|h| h["source_version"].as_u64() == Some(crate::media::RENDER_CACHE_VERSION))
+}
+
 /// Load the proxy at `path`.
 pub fn load(path: &Path) -> Result<crate::media::DecodedSource, String> {
     let b = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let (image, camera_tone) = decode(&b)?;
     let rest = b.strip_prefix(MAGIC).ok_or("not a smart preview")?;
     let nl = rest.iter().position(|b| *b == b'\n').ok_or("bad smart preview")?;
-    let head: serde_json::Value = serde_json::from_slice(&rest[..nl]).map_err(|e| e.to_string())?;
+    let header = rest.get(..nl).filter(|h| h.len() <= HEADER_MAX as usize).ok_or("oversized smart preview header")?;
+    let head: serde_json::Value = serde_json::from_slice(header).map_err(|e| e.to_string())?;
+    let camera_response =
+        head.get("camera_response").and_then(|v| serde_json::from_value::<lightcraft_pipeline::tone::CameraResponse>(v.clone()).ok()).map(Arc::new);
     let camera_rgb_tone = camera_tone.is_some() && head["camera_rgb_tone"].as_bool().unwrap_or(false);
     let sensor_long_edge = head["sensor_long_edge"].as_u64().filter(|v| *v <= 64_000_000).unwrap_or(0) as usize;
-    Ok(crate::media::DecodedSource { image: Arc::new(image), info: None, camera_tone, camera_rgb_tone, sensor_long_edge })
+    Ok(crate::media::DecodedSource { image: Arc::new(image), info: None, camera_tone, camera_rgb_tone, camera_response, sensor_long_edge })
 }
 
 #[cfg(test)]
@@ -217,6 +245,39 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn direct_camera_response_survives_offline_preview() {
+        let mut data = Vec::new();
+        for b in 0..33 {
+            for g in 0..33 {
+                for r in 0..33 {
+                    data.push([r, g, b].map(lightcraft_pipeline::tone::CameraResponse::input).map(|x| x / (1.0 + x)));
+                }
+            }
+        }
+        let response = Arc::new(lightcraft_pipeline::tone::CameraResponse::new(data).unwrap());
+        let info = lightcraft_pipeline::SourceInfo {
+            raw: true,
+            relative_wb: true,
+            camera_response: Some(response.clone()),
+            camera_tone: Some(response.grey_tone()),
+            camera_rgb_tone: true,
+            sensor_long_edge: 6192,
+            ..Default::default()
+        };
+        let mut image = Rgb32f::new(16, 16);
+        image.data.fill([0.2, 0.1, 0.05]);
+        let bytes = encode_source(&image, &info).unwrap();
+        let path = std::env::temp_dir().join(format!("lightcraft-response-preview-{}.lcsp", std::process::id()));
+        std::fs::write(&path, bytes).unwrap();
+        assert!(is_valid(&path));
+        assert!(is_current(&path));
+        let loaded = load(&path).unwrap().info_or(lightcraft_pipeline::SourceInfo { raw: true, relative_wb: true, ..Default::default() });
+        assert_eq!(loaded.camera_response, Some(response));
+        assert_eq!(loaded.sensor_long_edge, 6192);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -285,10 +346,11 @@ mod tests {
         std::fs::write(&path, &bytes).unwrap();
         // the longer header is still read by the validity check, and the curve by `load`
         assert!(is_valid(&path));
+        assert!(is_current(&path));
         let loaded = load(&path).unwrap();
         assert_eq!(loaded.camera_tone, Some(tone));
         let header = lightcraft_pipeline::SourceInfo { raw: true, ..Default::default() };
-        assert_eq!(loaded.info_or(header).camera_tone, Some(tone));
+        assert_eq!(loaded.info_or(header.clone()).camera_tone, Some(tone));
         let native_info = lightcraft_pipeline::SourceInfo {
             raw: true,
             relative_wb: true,
