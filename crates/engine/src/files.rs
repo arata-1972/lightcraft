@@ -216,7 +216,12 @@ pub fn load_vec(bytes: Vec<u8>, max_edge: usize) -> Result<(Rgb32f, SourceInfo),
 /// Display-fit rejection cannot invalidate a successful calibrated RAW decode.
 #[cfg(any(target_os = "macos", test))]
 fn calibrated_native_source(native: lightcraft_sysraw::LinearRaw, mut info: SourceInfo) -> (Rgb32f, SourceInfo) {
-    let fitted = crate::camera_preview::native_tone(&native.linear_proxy, &native.display_proxy);
+    let response = native.response.and_then(lightcraft_pipeline::tone::CameraResponse::new).map(std::sync::Arc::new);
+    let fitted = response.as_ref().map(|r| r.grey_tone()).or_else(|| crate::camera_preview::native_tone(&native.linear_proxy, &native.display_proxy));
+    if response.is_some() && lightcraft_pipeline::profiling() {
+        eprintln!("[profile] native RAW direct RGB response; no scene/preview tone fitting");
+    }
+    info.camera_response = response;
     if fitted.is_none() && lightcraft_pipeline::profiling() {
         eprintln!("[profile] macOS RAW starting tone rejected; retaining calibrated source with neutral response");
     }
@@ -430,6 +435,7 @@ mod tests {
     fn rejected_native_look_keeps_calibrated_pixels_and_capture_wb() {
         let proxy = || lightcraft_sysraw::Pixels { width: 1, height: 1, rgb: vec![[0.2, 0.1, 0.05]] };
         let native = lightcraft_sysraw::LinearRaw {
+            response: None,
             pixels: lightcraft_sysraw::Pixels { width: 1, height: 1, rgb: vec![[3.0, 0.2, 0.05]] },
             linear_proxy: proxy(),
             display_proxy: proxy(),

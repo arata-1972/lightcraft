@@ -157,7 +157,7 @@ fn smart_run(
             // a complete proxy is kept; a missing or damaged one (cut short by a crash or a full
             // drive) is (re)built
             let damaged = path.exists();
-            if damaged && crate::smart::is_valid(&path) {
+            if damaged && crate::smart::is_current(&path) {
                 n.built += 1;
             } else {
                 // atomic: a failed write leaves no partial proxy that would pass for a built one

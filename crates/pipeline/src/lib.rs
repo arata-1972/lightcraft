@@ -55,7 +55,7 @@ use lightcraft_raster::{Histogram, Plane, Rgb32f, Rgba8, par_rows};
 pub use tone::ToneMap;
 
 /// Facts about the source the settings are interpreted against.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SourceInfo {
     /// Lens corrections embedded in the file (DNG opcodes), relative to the EXIF-oriented source.
     pub lens: Option<lightcraft_develop::EmbeddedLens>,
@@ -67,6 +67,7 @@ pub struct SourceInfo {
     /// No measured camera illuminant: WB adjustments are relative to the camera's rendered look.
     pub relative_wb: bool,
     pub camera_tone: Option<tone::CameraTone>,
+    pub camera_response: Option<Arc<tone::CameraResponse>>,
     /// Calibrated linear RAW with a shared channel response, rather than luminance-only tone.
     pub camera_rgb_tone: bool,
     /// Original oriented sensor long edge, independent of the decoded preview resolution.
@@ -82,6 +83,7 @@ impl Default for SourceInfo {
             lens: None,
             relative_wb: false,
             camera_tone: None,
+            camera_response: None,
             camera_rgb_tone: false,
             sensor_long_edge: 0,
         }

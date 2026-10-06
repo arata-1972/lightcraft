@@ -60,7 +60,9 @@ pub fn auto_tone(src: &Rgb32f, info: &SourceInfo, s: &DevelopSettings) -> AutoTo
             .data
             .iter()
             .map(|c| {
-                if info.camera_rgb_tone {
+                if let Some(response) = &info.camera_response {
+                    luminance_2020(response.apply(c.map(|v| v * gain)))
+                } else if info.camera_rgb_tone {
                     luminance_2020(c.map(|v| curve.apply((v * gain).max(0.0))))
                 } else {
                     curve.apply(luminance_2020(*c) * gain)
