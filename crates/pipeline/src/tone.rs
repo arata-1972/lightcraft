@@ -34,6 +34,18 @@ impl<'de> serde::Deserialize<'de> for CameraTone {
 }
 
 impl CameraTone {
+    /// A restrained display response for a calibrated source whose optional starting-look fit
+    /// was rejected. Midtones remain linear; only display highlights receive a soft shoulder.
+    /// This curve never changes the source calibration or lifts shadows to match a preview.
+    pub fn neutral() -> Self {
+        let knots = std::array::from_fn(|i| {
+            let x = 2f32.powf(-12.0 + i as f32 * 14.0 / 31.0);
+            let y = if x <= 0.8 { x } else { 0.8 + 0.2 * (1.0 - (-(x - 0.8) / 0.2).exp()) };
+            [x, y.min(1.0 - f32::EPSILON)]
+        });
+        Self { knots }
+    }
+
     pub fn new(knots: [[f32; 2]; 32]) -> Option<Self> {
         let mut previous = [0.0, 0.0];
         for p in knots {
@@ -177,6 +189,23 @@ fn smooth(e0: f32, e1: f32, x: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn neutral_camera_response_preserves_midtones_and_bounds_highlights() {
+        let curve = CameraTone::neutral();
+        assert!(CameraTone::new(curve.knots).is_some());
+        for x in [0.0, 0.001, 0.02, 0.18, 0.4, 0.6] {
+            assert!((curve.apply(x) - x).abs() < 1e-5);
+        }
+        let mut previous = 0.0;
+        for i in 0..1000 {
+            let v = curve.apply(i as f32 / 100.0);
+            assert!((0.0..=1.0).contains(&v) && v >= previous);
+            previous = v;
+        }
+        assert!(curve.apply(1.0) < 1.0);
+        assert!(curve.apply(2.0) > curve.apply(1.0));
+    }
+
     use super::*;
 
     #[test]

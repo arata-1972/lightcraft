@@ -1,3 +1,29 @@
+#[test]
+fn previous_high_iso_factory_defaults_upgrade_but_custom_detail_does_not() {
+    let mut catalog = Catalog::new();
+    for (id, custom) in [(1, false), (2, true)] {
+        let mut p = Photo::new(PhotoId(id), Source::Demo { scene: 0 }, "high.ARW", "ARW", 4128, 6192, "2026-10-06");
+        p.kind = MediaKind::Raw;
+        p.meta.iso = Some(32000);
+        let mut old = DevelopSettings::for_raw(6500.0, 0.0);
+        old.detail.nr_luminance = 36.0;
+        old.detail.sharpen_amount = 16.0;
+        old.detail.sharpen_masking = 65.0;
+        if custom {
+            old.detail.nr_color = 26.0;
+        }
+        p.develop = Arc::new(old);
+        catalog.apply(Op::AddPhoto { photo: Box::new(p) }).unwrap();
+    }
+    let custom = catalog.photo(PhotoId(2)).unwrap().develop.clone();
+    catalog.upgrade_arw_defaults();
+    assert!(catalog.photo(PhotoId(1)).unwrap().develop.detail.nr_luminance > 36.0);
+    assert_eq!(catalog.photo(PhotoId(2)).unwrap().develop, custom);
+    let upgraded = catalog.clone();
+    catalog.upgrade_arw_defaults();
+    assert_eq!(catalog, upgraded);
+}
+
 use std::sync::Arc;
 
 use lightcraft_develop::DevelopSettings;
