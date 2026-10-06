@@ -180,7 +180,8 @@ fn failed_background_snapshot_loses_nothing_and_retries_later() {
     wait_written(&j);
     assert!(j.poll().is_err());
     assert_eq!((j.snapshot_seq(), j.stats().failed_snapshots), (0, 1));
-    assert!(g.files.get(SNAPSHOT).is_none());
+    // still the (empty) snapshot written when the library was created
+    assert_eq!(g.snapshot_seq_on_disk(), Some(0));
     assert_recovers(&g, &live);
     // no retry storm: the next attempt waits for another `max_records` records
     assert!(!j.wants_snapshot());

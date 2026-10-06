@@ -5,12 +5,25 @@
 //! creator, keywords, capture time and GPS in the standard namespaces, plus our complete develop
 //! settings (`lc:settings`, JSON), the pick/reject flag (`lc:flag`) and location (`lc:location`).
 //!
+//! An existing sidecar is never replaced wholesale (issue #92): LightCraft's properties
+//! ([`OWNED`], [`OWNED_IF_STATED`]) are merged into it ([`lightcraft_meta::merge_xmp`]) and
+//! everything else — another editor's `crs:` develop settings, `xmpMM` history, unknown
+//! namespaces — is kept byte for byte. A sidecar that can't be read as XMP is first copied to
+//! `<name>.xmp.bak-<time>` (never overwritten), then replaced. Writes are atomic (temp file,
+//! fsync, rename).
+//!
+//! **Shared names** (Stem naming): `IMG_0001.CR3` and `IMG_0001.JPG` would share `IMG_0001.xmp`.
+//! When two catalogued files map to one stem sidecar, it belongs to one of them (a raw first, then
+//! the first by file name — [`Session::sidecar_naming`]); the others use `<file>.xmp`
+//! (`IMG_0001.JPG.xmp`) for writing and reading, so neither overwrites the other.
+//!
 //! **Read** (on import, and `photo.readMetadataFromFile`): the sidecar wins for metadata, except
 //! the capture time: a time embedded in the file wins, and the sidecar's (`exif:DateTimeOriginal`,
 //! else `photoshop:DateCreated`, else `xmp:CreateDate`) fills in only when the file has none; develop
 //! settings are restored from `lc:settings` when present, else mapped from interoperable `crs:`
 //! fields ([`crate::crs`]). For raw/DNG files without a sidecar the file's embedded XMP is used.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -258,13 +271,99 @@ pub fn sidecar_packet(p: &Photo, cat: &lightcraft_catalog::Catalog) -> String {
     lightcraft_meta::write_xmp_lc(&meta, &lc)
 }
 
-/// Write `data` to `path` atomically (temp file + rename).
+/// The properties LightCraft writes and owns in a sidecar: replaced on every save (removed when
+/// LightCraft has no value, so clearing a field clears it in the file too). All of them are read
+/// back on import and by Read Metadata from File.
+pub const OWNED: &[&str] = &[
+    "xmp:Rating",
+    "xmp:Label",
+    "dc:title",
+    "dc:description",
+    "dc:rights",
+    "dc:creator",
+    "dc:subject",
+    "Iptc4xmpCore:Location",
+    "Iptc4xmpCore:AltTextAccessibility",
+    "Iptc4xmpCore:ExtDescrAccessibility",
+    "photoshop:City",
+    "photoshop:State",
+    "photoshop:Country",
+    "xmpRights:Marked",
+    "xmpRights:UsageTerms",
+    "xmpRights:WebStatement",
+    "lc:*",
+];
+
+/// Properties replaced only when LightCraft has a value (capture time; GPS, which LightCraft
+/// doesn't read from sidecars): otherwise the sidecar's own value stays. Anything else LightCraft
+/// writes (`xmp:CreatorTool`) goes only into new sidecars.
+pub const OWNED_IF_STATED: &[&str] = &["exif:DateTimeOriginal", "photoshop:DateCreated", "exif:GPSLatitude", "exif:GPSLongitude"];
+
+/// Write `data` to `path` atomically: a temp file next to it, synced, then renamed over it.
 fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
-    let tmp = path.with_extension(format!("xmp.tmp-{}", std::process::id()));
-    std::fs::write(&tmp, data)?;
-    std::fs::rename(&tmp, path).inspect_err(|_| {
-        let _ = std::fs::remove_file(&tmp);
-    })
+    lightcraft_catalog::safe_file::write_atomic(path, data)
+}
+
+/// Copy `path` to a new `<name>.bak-<stamp>` (`-1`, `-2`… if taken; never overwriting).
+fn backup(path: &Path, stamp: &str) -> std::io::Result<PathBuf> {
+    use std::io::Write;
+    let bytes = std::fs::read(path)?;
+    let stamp: String = stamp.chars().filter(char::is_ascii_alphanumeric).collect();
+    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    for k in 0..1000 {
+        let b = path.with_file_name(if k == 0 { format!("{name}.bak-{stamp}") } else { format!("{name}.bak-{stamp}-{k}") });
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&b) {
+            Ok(mut f) => {
+                f.write_all(&bytes)?;
+                f.sync_all()?;
+                return Ok(b);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::other("no free backup name"))
+}
+
+/// What [`Session::save_sidecar`] did.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SidecarSaved {
+    pub path: PathBuf,
+    /// An existing sidecar was merged into (its other contents kept).
+    pub merged: bool,
+    /// An existing sidecar that couldn't be read as XMP was copied here before being replaced.
+    pub backup: Option<PathBuf>,
+}
+
+/// The new contents for the sidecar at `path`: `fresh` merged into the existing file, if any.
+/// Returns (contents, merged, backup).
+fn sidecar_contents(path: &Path, fresh: String, stamp: &str) -> std::io::Result<(String, bool, Option<PathBuf>)> {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((fresh, false, None)),
+        // can't see what is there: never overwrite it blindly
+        Err(e) => return Err(e),
+    };
+    if bytes.iter().all(u8::is_ascii_whitespace) {
+        return Ok((fresh, false, None));
+    }
+    let rules = lightcraft_meta::MergeRules { owned: OWNED, owned_if_present: OWNED_IF_STATED };
+    match std::str::from_utf8(&bytes)
+        .map_err(|e| e.to_string())
+        .and_then(|old| lightcraft_meta::merge_xmp(old, &fresh, rules).map_err(|e| e.to_string()))
+    {
+        Ok(merged) => Ok((merged, true, None)),
+        Err(why) => {
+            let b = backup(path, stamp)?;
+            log::warn!("{}: not readable as XMP ({why}); kept a copy as {} before replacing it", path.display(), b.display());
+            Ok((fresh, false, Some(b)))
+        }
+    }
+}
+
+/// Key of the stem sidecar a file maps to (case-insensitive).
+fn stem_key(original: &str) -> String {
+    sidecar_path(original, SidecarNaming::Stem).to_string_lossy().to_lowercase()
 }
 
 fn file_path(p: &Photo) -> Option<&str> {
@@ -302,24 +401,70 @@ pub(crate) fn op_photos(op: &Op, out: &mut Vec<PhotoId>) {
     }
 }
 
+/// Which photo owns each stem sidecar that several catalogued files map to (see
+/// [`Session::sidecar_naming`]).
+pub(crate) struct StemOwners(HashMap<String, PhotoId>);
+
+impl StemOwners {
+    pub(crate) fn of(cat: &lightcraft_catalog::Catalog) -> StemOwners {
+        // per stem: (raw first, then file name, then id) of the best candidate; and how many
+        let mut best: HashMap<String, ((bool, String, u64), PhotoId, usize)> = HashMap::new();
+        for p in cat.photos().filter(|p| p.copy_of.is_none()) {
+            let Some(path) = file_path(p) else { continue };
+            let rank = (p.kind != MediaKind::Raw, path.to_lowercase(), p.id.0);
+            let e = best.entry(stem_key(path)).or_insert_with(|| (rank.clone(), p.id, 0));
+            e.2 += 1;
+            if rank < e.0 {
+                (e.0, e.1) = (rank, p.id);
+            }
+        }
+        StemOwners(best.into_iter().filter(|(_, v)| v.2 > 1).map(|(k, v)| (k, v.1)).collect())
+    }
+
+    /// `naming` for photo `p`, except that a stem sidecar another file owns becomes Full.
+    fn naming(&self, p: &Photo, naming: SidecarNaming) -> SidecarNaming {
+        match (naming, file_path(p)) {
+            (SidecarNaming::Stem, Some(path)) if self.0.get(&stem_key(path)).is_some_and(|owner| *owner != p.id) => SidecarNaming::Full,
+            _ => naming,
+        }
+    }
+}
+
 impl Session {
-    /// Write the photo's XMP sidecar; returns its path.
-    pub fn save_sidecar(&self, id: PhotoId) -> Result<PathBuf> {
+    /// The sidecar naming for photo `id`: the library's, except under Stem naming when another
+    /// catalogued file shares the stem (`IMG_0001.CR3` + `IMG_0001.JPG`) and owns the stem
+    /// sidecar — a raw first, else the first by file name. The others use Full naming
+    /// (`IMG_0001.JPG.xmp`), so their metadata never overwrites each other.
+    pub fn sidecar_naming(&self, id: PhotoId) -> SidecarNaming {
+        match self.catalog.photo(id) {
+            Some(p) if self.xmp.naming == SidecarNaming::Stem => StemOwners::of(&self.catalog).naming(p, self.xmp.naming),
+            _ => self.xmp.naming,
+        }
+    }
+
+    /// Write the photo's XMP sidecar, merged into an existing one (see the module docs).
+    pub fn save_sidecar(&self, id: PhotoId) -> Result<SidecarSaved> {
+        self.save_sidecar_with(id, &StemOwners::of(&self.catalog))
+    }
+
+    pub(crate) fn save_sidecar_with(&self, id: PhotoId, owners: &StemOwners) -> Result<SidecarSaved> {
         let p = self.catalog.photo(id).ok_or(lightcraft_catalog::CatalogError::NoPhoto(id))?;
         if p.copy_of.is_some() {
             return Err(EngineError::Other(format!("{} is a virtual copy: its settings live only in the library", p.file_name)));
         }
         let orig = file_path(p).ok_or_else(|| EngineError::Other(format!("{} is not a file on disk", p.file_name)))?;
-        let path = sidecar_path(orig, self.xmp.naming);
-        write_atomic(&path, sidecar_packet(p, &self.catalog).as_bytes()).map_err(|e| EngineError::Other(format!("{}: {e}", path.display())))?;
-        Ok(path)
+        let path = sidecar_path(orig, owners.naming(p, self.xmp.naming));
+        let err = |e: std::io::Error| EngineError::Other(format!("{}: {e}", path.display()));
+        let (data, merged, backup) = sidecar_contents(&path, sidecar_packet(p, &self.catalog), &(self.clock)()).map_err(err)?;
+        write_atomic(&path, data.as_bytes()).map_err(err)?;
+        Ok(SidecarSaved { path, merged, backup })
     }
 
     /// The op that applies a photo's sidecar (or embedded XMP) to the catalog, if there is one.
     pub fn read_sidecar_op(&self, id: PhotoId) -> Result<Option<(Op, PathBuf)>> {
         let p = self.catalog.photo(id).ok_or(lightcraft_catalog::CatalogError::NoPhoto(id))?;
         let Some(orig) = file_path(p) else { return Ok(None) };
-        let Some((packet, from)) = read_packet(orig, p.kind, self.xmp.naming) else { return Ok(None) };
+        let Some((packet, from)) = read_packet(orig, p.kind, self.sidecar_naming(id)) else { return Ok(None) };
         let sc = parse_sidecar(&packet, p.kind == MediaKind::Raw)
             .map_err(|e| EngineError::Other(format!("{}: {e}", from.display())))?
             .resolve_label(&self.catalog);
@@ -344,9 +489,13 @@ impl Session {
     pub(crate) fn auto_write_sidecars(&self, ops: &[Op]) {
         let mut ids = Vec::new();
         ops.iter().for_each(|o| op_photos(o, &mut ids));
+        if ids.is_empty() {
+            return;
+        }
+        let owners = StemOwners::of(&self.catalog);
         for id in ids {
             if self.catalog.photo(id).is_some_and(|p| file_path(p).is_some() && p.copy_of.is_none())
-                && let Err(e) = self.save_sidecar(id)
+                && let Err(e) = self.save_sidecar_with(id, &owners)
             {
                 log::warn!("auto-write XMP: {e}");
             }

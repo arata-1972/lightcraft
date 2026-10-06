@@ -86,6 +86,24 @@ fn render_subcommand() {
     assert!(String::from_utf8_lossy(&o.stderr).contains("unknown control"));
 }
 
+/// Issue #93: `render IMG -o IMG` replaced its own input with the render.
+#[test]
+fn render_refuses_to_overwrite_its_input() {
+    let input = tmp("self-in.png");
+    gradient_png(&input);
+    let before = std::fs::read(&input).unwrap();
+    let dir = input.parent().unwrap();
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    let other_spelling = dir.join("sub/../self-in.png");
+    for out in [&input, &other_spelling] {
+        let o =
+            Command::new(BIN).args(["render", input.to_str().unwrap(), "-o", out.to_str().unwrap(), "--set", "light.exposure=1"]).output().unwrap();
+        assert!(!o.status.success());
+        assert!(String::from_utf8_lossy(&o.stderr).contains("never writes over an original"), "{}", String::from_utf8_lossy(&o.stderr));
+    }
+    assert_eq!(std::fs::read(&input).unwrap(), before, "the input is untouched");
+}
+
 #[test]
 fn render_export_options() {
     let input = tmp("o-in.png");
@@ -241,4 +259,32 @@ fn devices_are_listed_and_imported_from() {
     let o = Command::new(BIN).args(["run", "library.importPreview", &format!("paths=[\"{dcim}\"]")]).output().unwrap();
     let line: Value = serde_json::from_slice(o.stdout.split(|b| *b == b'\n').next().unwrap()).unwrap();
     assert_eq!(line["result"]["candidates"].as_array().map(Vec::len), Some(1), "{line}");
+}
+
+/// Issue #99: a library open in one process (here `mcp --library`) is refused by a second one,
+/// with who has it and how to drive the running app instead; free again once the first exits.
+#[test]
+fn a_library_open_in_another_process_is_refused() {
+    let lib = tmp("locked-lib");
+    let _ = std::fs::remove_dir_all(&lib);
+    let lib_s = lib.to_str().unwrap();
+    let mut holder =
+        Command::new(BIN).args(["mcp", "--library", lib_s]).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+    let mut err = BufReader::new(holder.stderr.take().unwrap());
+    let mut line = String::new();
+    while !line.contains("opened library") {
+        line.clear();
+        assert!(err.read_line(&mut line).unwrap() > 0, "mcp exited before opening the library");
+    }
+    let (ok, _, stderr) = run_cli(&["--library", lib_s, "library.info"], None);
+    assert!(!ok);
+    assert!(stderr.contains("already open in lightcraft-cli") && stderr.contains(&format!("process {}", holder.id())), "{stderr}");
+    assert!(stderr.contains("mcp --connect"), "{stderr}");
+
+    drop(holder.stdin.take()); // EOF: the server exits and lets go of the library
+    assert!(holder.wait().unwrap().success());
+    let (ok, lines, stderr) = run_cli(&["--library", lib_s, "library.info"], None);
+    assert!(ok, "{stderr}");
+    assert_eq!(lines[0]["ok"], true);
+    let _ = std::fs::remove_dir_all(&lib);
 }

@@ -11,7 +11,11 @@
 //!
 //! Safety:
 //! - a target that exists on disk, or that another photo in the batch gets, receives a `-1`, `-2`…
-//!   suffix — no file is ever overwritten;
+//!   suffix — no file is ever overwritten. Whether an existing target is the photo itself (a
+//!   change of letter case on a case-insensitive volume) is decided by file identity, not by
+//!   comparing names, so on a case-sensitive volume `img_1.jpg` next to `IMG_1.JPG` is a collision
+//!   (issue #95); moves never replace a file even if one appears after the check (hard link +
+//!   unlink where the volume supports it);
 //! - the moves happen before the catalog changes; if one fails, the ones already done are moved
 //!   back and nothing is committed;
 //! - the catalog op ([`Op::SetFile`]) is undoable: undo/redo move the files back and forth (see
@@ -297,139 +301,352 @@ fn sidecars(path: &str) -> Vec<(PathBuf, SidecarNaming, bool)> {
     v
 }
 
-/// Move `from` to `to` (never over an existing file) together with its sidecars. On error nothing
-/// is left moved.
-pub fn move_file(from: &str, to: &str) -> std::result::Result<(), String> {
+/// The file-system primitives renaming uses. [`RealFs`] is the disk; tests substitute a model of
+/// a case-insensitive or case-sensitive volume (and inject failures).
+pub(crate) trait MoveFs {
+    /// Something (file, folder, link) answers to `p`.
+    fn exists(&self, p: &Path) -> bool;
+    fn is_file(&self, p: &Path) -> bool;
+    /// `a` and `b` name the same file (e.g. `IMG.JPG` and `img.jpg` on a case-insensitive
+    /// volume). Decided by file identity, never by comparing names: on a case-sensitive volume
+    /// they are two different photos. When in doubt: `false`.
+    fn same_file(&self, a: &Path, b: &Path) -> bool;
+    /// Rename `a` to `b`, failing (never replacing) when `b` exists.
+    fn rename_no_replace(&self, a: &Path, b: &Path) -> std::io::Result<()>;
+    /// Copy `a` to a new file `b` (an independent copy, never a link), failing when `b` exists.
+    fn copy_no_replace(&self, a: &Path, b: &Path) -> std::io::Result<()>;
+    fn remove_file(&self, p: &Path) -> std::io::Result<()>;
+    /// Another photo file beside the stem-named sidecar `sidecar` that shares its stem (e.g.
+    /// `IMG_1.JPG` for `IMG_1.xmp`), which still uses that sidecar.
+    fn stem_sibling(&self, sidecar: &Path) -> Option<String>;
+}
+
+/// The real file system.
+pub(crate) struct RealFs;
+
+impl MoveFs for RealFs {
+    fn exists(&self, p: &Path) -> bool {
+        std::fs::symlink_metadata(p).is_ok()
+    }
+
+    fn is_file(&self, p: &Path) -> bool {
+        p.is_file()
+    }
+
+    fn same_file(&self, a: &Path, b: &Path) -> bool {
+        if a == b {
+            return true;
+        }
+        let (Ok(ma), Ok(mb)) = (std::fs::metadata(a), std::fs::metadata(b)) else { return false };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            ma.dev() == mb.dev() && ma.ino() == mb.ino()
+        }
+        #[cfg(not(unix))]
+        {
+            // no stable file id in std here: `b` is `a` under another spelling when they look
+            // alike and the folder has no entry spelled exactly like `b` (on a case-sensitive
+            // folder holding both `IMG.JPG` and `img.jpg`, both entries are listed)
+            let (Some(dir), Some(name)) = (b.parent(), b.file_name()) else { return false };
+            if a.parent() != Some(dir) || ma.len() != mb.len() || ma.modified().ok() != mb.modified().ok() {
+                return false;
+            }
+            let Ok(entries) = std::fs::read_dir(dir) else { return false };
+            !entries.flatten().any(|e| e.file_name() == name)
+        }
+    }
+
+    fn rename_no_replace(&self, a: &Path, b: &Path) -> std::io::Result<()> {
+        if self.exists(b) {
+            return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, format!("{} already exists", b.display())));
+        }
+        // A hard link fails when `b` exists — even if it appeared since the check above — so
+        // nothing is ever replaced. Volumes without hard links (FAT, some network shares) fall back
+        // to a plain rename after the check.
+        match std::fs::hard_link(a, b) {
+            Ok(()) => std::fs::remove_file(a).inspect_err(|_| {
+                // both names are the same file: dropping the new one loses nothing
+                let _ = std::fs::remove_file(b);
+            }),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(e),
+            Err(_) => std::fs::rename(a, b),
+        }
+    }
+
+    fn copy_no_replace(&self, a: &Path, b: &Path) -> std::io::Result<()> {
+        use std::io::Write;
+        let bytes = std::fs::read(a)?;
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(b)?;
+        f.write_all(&bytes).and_then(|_| f.sync_all()).inspect_err(|_| {
+            let _ = std::fs::remove_file(b);
+        })
+    }
+
+    fn remove_file(&self, p: &Path) -> std::io::Result<()> {
+        std::fs::remove_file(p)
+    }
+
+    fn stem_sibling(&self, sidecar: &Path) -> Option<String> {
+        crate::import_move::sibling_photo(sidecar)
+    }
+}
+
+/// `from` → `to` differs only in letter case and `to` is that very file (a case-insensitive
+/// volume): the rename must go through a temporary name.
+fn is_respelling(fs: &dyn MoveFs, from: &Path, to: &Path) -> bool {
+    from != to && from.to_string_lossy().to_lowercase() == to.to_string_lossy().to_lowercase() && fs.exists(to) && fs.same_file(from, to)
+}
+
+/// Rename `a` to `b` without ever replacing a file; a change of letter case only goes through a
+/// unique temporary name so case-insensitive volumes see a real change.
+fn move_one(fs: &dyn MoveFs, a: &Path, b: &Path) -> std::io::Result<()> {
+    if !is_respelling(fs, a, b) {
+        return fs.rename_no_replace(a, b);
+    }
+    let tmp = (0..1000u32)
+        .map(|k| a.with_file_name(format!(".lc-rename-{}-{k}", std::process::id())))
+        .find(|t| !fs.exists(t))
+        .ok_or_else(|| std::io::Error::other("no free temporary name"))?;
+    fs.rename_no_replace(a, &tmp)?;
+    fs.rename_no_replace(&tmp, b).map_err(|e| match fs.rename_no_replace(&tmp, a) {
+        Ok(()) => e,
+        Err(e2) => std::io::Error::other(format!("{e}; it could not be given its old name back either ({e2}): it is now {}", tmp.display())),
+    })
+}
+
+/// Why [`move_file`] failed, and what it left behind.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MoveError {
+    /// What went wrong, including every step that could not be undone and where that file is now.
+    pub message: String,
+    /// The file itself ended up at the new path: it moved, a sidecar didn't, and moving the file
+    /// back failed too. Its sidecars that did move stay with it.
+    pub moved: bool,
+}
+
+impl std::fmt::Display for MoveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+/// Move `from` to `to` (never over an existing file) together with its sidecars. On error the
+/// moves are undone; whatever can't be undone is named in the error (see [`MoveError`]).
+pub fn move_file(from: &str, to: &str) -> std::result::Result<(), MoveError> {
+    move_file_with(&RealFs, from, to)
+}
+
+/// [`move_file`] on the file system `fs`.
+pub(crate) fn move_file_with(fs: &dyn MoveFs, from: &str, to: &str) -> std::result::Result<(), MoveError> {
     if from == to {
         return Ok(());
     }
+    let fail = |message: String| MoveError { message, moved: false };
     let (f, t) = (Path::new(from), Path::new(to));
-    // a case-only change on a case-insensitive file system "exists" already: that is this file
-    let case_only = from.to_lowercase() == to.to_lowercase();
-    if t.exists() && !case_only {
-        return Err(format!("{to} already exists"));
+    // `to` may be this very file spelled differently (case-insensitive volume); any other file
+    // there — e.g. `img.jpg` next to `IMG.JPG` on a case-sensitive volume — is never replaced
+    if fs.exists(t) && !is_respelling(fs, f, t) {
+        return Err(fail(format!("{to} already exists")));
     }
-    let mut done: Vec<(PathBuf, PathBuf)> = Vec::new();
-    let mv = |a: &Path, b: &Path| -> std::io::Result<()> {
-        if case_only {
-            // via a temporary name, so case-insensitive file systems see a real change
-            let tmp = a.with_file_name(format!(".lc-rename-{}", std::process::id()));
-            std::fs::rename(a, &tmp)?;
-            std::fs::rename(&tmp, b).inspect_err(|_| {
-                let _ = std::fs::rename(&tmp, a);
-            })
-        } else {
-            std::fs::rename(a, b)
-        }
-    };
-    mv(f, t).map_err(|e| format!("rename {from}: {e}"))?;
-    done.push((f.to_path_buf(), t.to_path_buf()));
+    move_one(fs, f, t).map_err(|e| fail(format!("rename {from}: {e}")))?;
+    // sidecars moved (or copied: `true`)
+    let mut done: Vec<(PathBuf, PathBuf, bool)> = Vec::new();
     for (sc, naming, upper) in sidecars(from) {
-        if !sc.is_file() {
+        if !fs.is_file(&sc) {
             continue;
         }
         let mut dst = crate::sidecar::sidecar_path(to, naming);
         if upper {
             dst = dst.with_extension("XMP");
         }
-        if dst.exists() && !case_only {
+        // a stem sidecar another file still uses (`IMG_1.xmp` of `IMG_1.CR3` and `IMG_1.JPG`)
+        // is copied, not taken away from it (issue #92)
+        let shared = naming == SidecarNaming::Stem && fs.stem_sibling(&sc).is_some();
+        if fs.exists(&dst) && (shared || !is_respelling(fs, &sc, &dst)) {
             continue; // never overwrite: the old sidecar stays where it was
         }
-        if let Err(e) = mv(&sc, &dst) {
-            for (a, b) in done.iter().rev() {
-                let _ = std::fs::rename(b, a);
+        let r = if shared { fs.copy_no_replace(&sc, &dst) } else { move_one(fs, &sc, &dst) };
+        if let Err(e) = r {
+            let mut message = format!("rename {}: {e}", sc.display());
+            // the file first: if it can't go back, the sidecars that moved stay with it
+            if let Err(e) = move_one(fs, t, f) {
+                message.push_str(&format!("; {from} could not be moved back ({e}): it is now {to}"));
+                if !done.is_empty() {
+                    let names: Vec<String> = done.iter().map(|(_, b, _)| b.display().to_string()).collect();
+                    message.push_str(&format!(" with its sidecar {}", names.join(", ")));
+                }
+                return Err(MoveError { message, moved: true });
             }
-            return Err(format!("rename {}: {e}", sc.display()));
+            for (a, b, copied) in done.iter().rev() {
+                if *copied {
+                    // the original is still there: the copy just goes (a leftover copy loses nothing)
+                    let _ = fs.remove_file(b);
+                } else if let Err(e) = move_one(fs, b, a) {
+                    message.push_str(&format!("; sidecar {} could not be moved back ({e}): it is now {}", a.display(), b.display()));
+                }
+            }
+            return Err(fail(message));
         }
-        done.push((sc, dst));
+        done.push((sc, dst, shared));
     }
     Ok(())
+}
+
+/// What a failed batch of moves ([`move_all`]) left behind.
+#[derive(Debug)]
+pub(crate) struct BatchMoveError {
+    /// The first failure and every move that could not be undone.
+    pub message: String,
+    /// Moves that stayed done, (from, to): those files are at `to` now.
+    pub stuck: Vec<(String, String)>,
+}
+
+/// Move the files `moves` names, all or nothing: after a failure the earlier moves are undone.
+/// Moves that can't be undone (e.g. the network share went away) are reported, not ignored.
+pub(crate) fn move_all(fs: &dyn MoveFs, moves: &[(String, String)]) -> std::result::Result<(), BatchMoveError> {
+    let mut done: Vec<&(String, String)> = Vec::new();
+    for m in moves {
+        let Err(e) = move_file_with(fs, &m.0, &m.1) else {
+            done.push(m);
+            continue;
+        };
+        let mut message = e.message;
+        let mut stuck = Vec::new();
+        if e.moved {
+            stuck.push(m.clone());
+        }
+        for d in done.iter().rev() {
+            if let Err(e) = move_file_with(fs, &d.1, &d.0) {
+                message.push_str(&format!("; {} could not be moved back to {}: {}", d.1, d.0, e.message));
+                if !e.moved {
+                    stuck.push((*d).clone());
+                }
+            }
+        }
+        return Err(BatchMoveError { message, stuck });
+    }
+    Ok(())
+}
+
+/// The `SetFile` ops in `op` (nested batches included) that point a photo at one of `to`.
+fn set_file_ops_to(op: &Op, to: &HashSet<&str>, out: &mut Vec<Op>) {
+    match op {
+        Op::Batch { ops } => ops.iter().for_each(|o| set_file_ops_to(o, to, out)),
+        Op::SetFile { source: Source::File { path }, .. } if to.contains(path.as_str()) => out.push(op.clone()),
+        _ => {}
+    }
+}
+
+/// The photos among `ids` a rename handles, in order: photos sharing one file (virtual copies)
+/// rename once. No file-system calls.
+pub fn rename_photos(cat: &lightcraft_catalog::Catalog, ids: &[PhotoId]) -> Vec<std::sync::Arc<Photo>> {
+    let mut seen_paths: HashSet<String> = HashSet::new();
+    ids.iter()
+        .filter_map(|id| cat.photo(*id))
+        .filter(|p| match &p.source {
+            Source::File { path } => seen_paths.insert(path.clone()),
+            _ => true,
+        })
+        .cloned()
+        .collect()
+}
+
+/// [`Session::plan_rename`] for [`rename_photos`], with the "is this name taken on disk?" check
+/// supplied: the Rename dialog plans its preview on a worker thread (a check can block on a slow
+/// drive). Whether a case-only change names this very file is decided on the disk.
+pub fn plan_rename_photos(photos: &[std::sync::Arc<Photo>], template: &str, start: usize, exists: &dyn Fn(&str) -> bool) -> Vec<RenamePlan> {
+    plan_rename_core(photos, template, start, &|p| exists(&p.to_string_lossy()), &|a, b| RealFs.same_file(a, b))
+}
+
+/// Plan renaming `photos`: `exists` says whether something answers to a path, `same_file` whether
+/// two spellings name one file (see [`MoveFs`]).
+fn plan_rename_core(
+    photos: &[std::sync::Arc<Photo>],
+    template: &str,
+    start: usize,
+    exists: &dyn Fn(&Path) -> bool,
+    same_file: &dyn Fn(&Path, &Path) -> bool,
+) -> Vec<RenamePlan> {
+    let mut taken: HashSet<String> = HashSet::new(); // lower-case target paths/names claimed in this batch
+    let mut out = Vec::new();
+    for (seq, p) in (start..).zip(photos) {
+        let want = expand(template, p, seq);
+        let (stem, ext) = split_ext(&want);
+        let (stem, ext) = (stem.to_string(), ext.to_string());
+        let candidate = |k: usize| {
+            if k == 0 {
+                want.clone()
+            } else if ext.is_empty() {
+                format!("{stem}-{k}")
+            } else {
+                format!("{stem}-{k}.{ext}")
+            }
+        };
+        let (to, to_path) = match &p.source {
+            Source::File { path } => {
+                let dir = Path::new(path).parent().map(Path::to_path_buf).unwrap_or_default();
+                let mut k = 0;
+                loop {
+                    let name = candidate(k);
+                    let tp = dir.join(&name).to_string_lossy().to_string();
+                    let key = tp.to_lowercase();
+                    // this very file, maybe spelled differently (case-insensitive volume)? By
+                    // identity: on a case-sensitive volume `img_1.jpg` may be another photo
+                    let (from, to) = (Path::new(path), Path::new(&tp));
+                    let same = tp == *path || (from != to && key == path.to_lowercase() && exists(to) && same_file(from, to));
+                    // free: not claimed in this batch and not on disk (unless it is this very file).
+                    // A file this batch moves away still counts as taken: simple and safe.
+                    if !taken.contains(&key) && (same || !exists(to)) {
+                        taken.insert(key);
+                        break (name, Some(tp));
+                    }
+                    k += 1;
+                }
+            }
+            Source::Demo { .. } => {
+                let mut k = 0;
+                loop {
+                    let name = candidate(k);
+                    if taken.insert(format!("demo:{}", name.to_lowercase())) {
+                        break (name, None);
+                    }
+                    k += 1;
+                }
+            }
+        };
+        let from_path = match &p.source {
+            Source::File { path } => Some(path.clone()),
+            _ => None,
+        };
+        out.push(RenamePlan { id: p.id.0, from: p.file_name.clone(), to, from_path, to_path });
+    }
+    out
 }
 
 impl Session {
     /// Plan renaming `ids` with `template` (sequence numbers from `start`), resolving collisions.
     pub fn plan_rename(&self, ids: &[PhotoId], template: &str, start: usize) -> Vec<RenamePlan> {
-        // photos sharing one file (virtual copies) rename once
-        let mut seen_paths: HashSet<String> = HashSet::new();
-        let mut taken: HashSet<String> = HashSet::new(); // lower-case target paths/names claimed in this batch
-        let mut out = Vec::new();
-        let mut seq = start;
-        for id in ids {
-            let Some(p) = self.catalog.photo(*id) else { continue };
-            if let Source::File { path } = &p.source
-                && !seen_paths.insert(path.clone())
-            {
-                continue;
-            }
-            let want = expand(template, p, seq);
-            seq += 1;
-            let (stem, ext) = split_ext(&want);
-            let (stem, ext) = (stem.to_string(), ext.to_string());
-            let candidate = |k: usize| {
-                if k == 0 {
-                    want.clone()
-                } else if ext.is_empty() {
-                    format!("{stem}-{k}")
-                } else {
-                    format!("{stem}-{k}.{ext}")
-                }
-            };
-            let (to, to_path) = match &p.source {
-                Source::File { path } => {
-                    let dir = Path::new(path).parent().map(Path::to_path_buf).unwrap_or_default();
-                    let mut k = 0;
-                    loop {
-                        let name = candidate(k);
-                        let tp = dir.join(&name).to_string_lossy().to_string();
-                        let key = tp.to_lowercase();
-                        let same = key == path.to_lowercase();
-                        // free: not claimed in this batch and not on disk (unless it is this very file).
-                        // A file this batch moves away still counts as taken: simple and safe.
-                        let on_disk = Path::new(&tp).exists() && !same;
-                        if !taken.contains(&key) && !on_disk {
-                            taken.insert(key);
-                            break (name, Some(tp));
-                        }
-                        k += 1;
-                    }
-                }
-                Source::Demo { .. } => {
-                    let mut k = 0;
-                    loop {
-                        let name = candidate(k);
-                        if taken.insert(format!("demo:{}", name.to_lowercase())) {
-                            break (name, None);
-                        }
-                        k += 1;
-                    }
-                }
-            };
-            let from_path = match &p.source {
-                Source::File { path } => Some(path.clone()),
-                _ => None,
-            };
-            out.push(RenamePlan { id: id.0, from: p.file_name.clone(), to, from_path, to_path });
-        }
-        out
+        self.plan_rename_with(&RealFs, ids, template, start)
+    }
+
+    /// [`Session::plan_rename`] on the file system `fs`.
+    pub(crate) fn plan_rename_with(&self, fs: &dyn MoveFs, ids: &[PhotoId], template: &str, start: usize) -> Vec<RenamePlan> {
+        plan_rename_core(&rename_photos(&self.catalog, ids), template, start, &|p| fs.exists(p), &|a, b| fs.same_file(a, b))
     }
 
     /// Carry out `plans`: move the files (rolled back on failure), then commit one undoable op
     /// that updates the photos (and their virtual copies).
+    ///
+    /// When a failure can't be fully rolled back, the files that kept their new names are
+    /// committed as a smaller undoable rename, so the library points at them (nothing goes
+    /// missing), and the error lists them (old → new).
     pub fn apply_rename(&mut self, plans: &[RenamePlan]) -> Result<usize> {
-        let mut moved: Vec<(String, String)> = Vec::new();
-        for pl in plans {
-            if let (Some(a), Some(b)) = (&pl.from_path, &pl.to_path)
-                && a != b
-            {
-                if let Err(e) = move_file(a, b) {
-                    for (a, b) in moved.iter().rev() {
-                        let _ = move_file(b, a);
-                    }
-                    return Err(EngineError::Other(e));
-                }
-                moved.push((a.clone(), b.clone()));
-            }
-        }
+        self.apply_rename_with(&RealFs, plans)
+    }
+
+    /// [`Session::apply_rename`] on the file system `fs`.
+    pub(crate) fn apply_rename_with(&mut self, fs: &dyn MoveFs, plans: &[RenamePlan]) -> Result<usize> {
         let mut ops = Vec::new();
         let by_path: HashMap<&str, &RenamePlan> = plans.iter().filter_map(|p| p.from_path.as_deref().map(|f| (f, p))).collect();
         for p in self.catalog.photos() {
@@ -447,15 +664,64 @@ impl Session {
             }
         }
         let n = ops.len();
+        let op = Op::Batch { ops };
+        let moves: Vec<(String, String)> = plans
+            .iter()
+            .filter_map(|pl| match (&pl.from_path, &pl.to_path) {
+                (Some(a), Some(b)) if a != b => Some((a.clone(), b.clone())),
+                _ => None,
+            })
+            .collect();
+        if let Err(e) = move_all(fs, &moves) {
+            return Err(EngineError::Other(self.follow_stuck(&op, e, true)));
+        }
         if n > 0
-            && let Err(e) = self.commit(&format!("Rename {n} Photo{}", if n == 1 { "" } else { "s" }), Op::Batch { ops })
+            && let Err(err) = self.commit(&format!("Rename {n} Photo{}", if n == 1 { "" } else { "s" }), op)
         {
-            for (a, b) in moved.iter().rev() {
-                let _ = move_file(b, a);
+            let back: Vec<(String, String)> = moves.iter().rev().map(|(a, b)| (b.clone(), a.clone())).collect();
+            if let Err(e) = move_all(fs, &back) {
+                return Err(EngineError::Other(format!("{err}; the renamed files could not all be moved back: {}", e.message)));
             }
-            return Err(e);
+            return Err(err);
         }
         Ok(n)
+    }
+
+    /// After a failed batch of moves for `op`: point the photos whose files stayed moved at
+    /// their new paths (an undoable "partly" rename when `undoable`, otherwise a plain logged
+    /// change), so the library matches the disk. Returns the message for the user.
+    pub(crate) fn follow_stuck(&mut self, op: &Op, e: BatchMoveError, undoable: bool) -> String {
+        let mut msg = e.message;
+        if e.stuck.is_empty() {
+            return msg;
+        }
+        let to: HashSet<&str> = e.stuck.iter().map(|m| m.1.as_str()).collect();
+        let mut keep = Vec::new();
+        set_file_ops_to(op, &to, &mut keep);
+        let list: Vec<String> = e.stuck.iter().map(|(a, b)| format!("{a} → {b}")).collect();
+        let n = e.stuck.len();
+        let s = if n == 1 { "" } else { "s" };
+        let fix = Op::Batch { ops: keep };
+        let applied = if undoable {
+            self.commit(&format!("Rename {n} Photo{s} (partly)"), fix)
+        } else {
+            match self.catalog.apply(fix.clone()) {
+                Ok(_) => {
+                    self.pending_log.push(fix);
+                    Ok(())
+                }
+                Err(e) => Err(e.into()),
+            }
+        };
+        match applied {
+            Ok(()) => msg
+                .push_str(&format!(". {n} file{s} could not be moved back and kept the new name; the library now points there: {}", list.join(", "))),
+            Err(err) => msg.push_str(&format!(
+                ". {n} file{s} could not be moved back and the library could not follow ({err}); relink with Find Missing Photos: {}",
+                list.join(", ")
+            )),
+        }
+        msg
     }
 
     /// File moves an undo/redo op implies: `SetFile` ops whose source path differs from the photo's
@@ -479,26 +745,240 @@ impl Session {
         rec(self, op, &mut v);
         v
     }
-
-    /// Move the files `moves` names; all or nothing.
-    pub(crate) fn move_files(moves: &[(String, String)]) -> Result<()> {
-        let mut done: Vec<&(String, String)> = Vec::new();
-        for m in moves {
-            if let Err(e) = move_file(&m.0, &m.1) {
-                for (a, b) in done.iter().rev().map(|m| (&m.0, &m.1)) {
-                    let _ = move_file(b, a);
-                }
-                return Err(EngineError::Other(format!("can't undo the rename: {e}")));
-            }
-            done.push(m);
-        }
-        Ok(())
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+
+    /// A model volume: files by path with contents; case-insensitive (default APFS/NTFS) or
+    /// case-sensitive (Linux, case-sensitive APFS). `fail` makes renames from a matching source fail.
+    pub(crate) struct FakeFs {
+        pub ci: bool,
+        pub files: RefCell<Vec<(String, Vec<u8>)>>,
+        pub fail: RefCell<Vec<String>>,
+    }
+
+    impl FakeFs {
+        pub fn new(ci: bool, files: &[(&str, &str)]) -> FakeFs {
+            FakeFs {
+                ci,
+                files: RefCell::new(files.iter().map(|(p, c)| (p.to_string(), c.as_bytes().to_vec())).collect()),
+                fail: RefCell::new(Vec::new()),
+            }
+        }
+        fn idx(&self, p: &Path) -> Option<usize> {
+            let p = p.to_string_lossy();
+            self.files.borrow().iter().position(|(f, _)| if self.ci { f.to_lowercase() == p.to_lowercase() } else { *f == p })
+        }
+        /// The listing: (exact path, contents), sorted.
+        pub fn listing(&self) -> Vec<(String, String)> {
+            let mut v: Vec<_> = self.files.borrow().iter().map(|(p, c)| (p.clone(), String::from_utf8_lossy(c).to_string())).collect();
+            v.sort();
+            v
+        }
+    }
+
+    impl MoveFs for FakeFs {
+        fn exists(&self, p: &Path) -> bool {
+            self.idx(p).is_some()
+        }
+        fn is_file(&self, p: &Path) -> bool {
+            self.exists(p)
+        }
+        fn same_file(&self, a: &Path, b: &Path) -> bool {
+            self.idx(a).is_some() && self.idx(a) == self.idx(b)
+        }
+        fn rename_no_replace(&self, a: &Path, b: &Path) -> std::io::Result<()> {
+            if self.fail.borrow().iter().any(|f| a.to_string_lossy().contains(f.as_str())) {
+                return Err(std::io::Error::other("injected failure"));
+            }
+            if self.exists(b) {
+                return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "exists"));
+            }
+            let i = self.idx(a).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no such file"))?;
+            self.files.borrow_mut()[i].0 = b.to_string_lossy().to_string();
+            Ok(())
+        }
+        fn copy_no_replace(&self, a: &Path, b: &Path) -> std::io::Result<()> {
+            if self.exists(b) {
+                return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "exists"));
+            }
+            let i = self.idx(a).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no such file"))?;
+            let c = self.files.borrow()[i].1.clone();
+            self.files.borrow_mut().push((b.to_string_lossy().to_string(), c));
+            Ok(())
+        }
+        fn remove_file(&self, p: &Path) -> std::io::Result<()> {
+            let i = self.idx(p).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no such file"))?;
+            self.files.borrow_mut().remove(i);
+            Ok(())
+        }
+        fn stem_sibling(&self, sidecar: &Path) -> Option<String> {
+            let stem = sidecar.with_extension("").to_string_lossy().to_string();
+            self.files.borrow().iter().map(|(f, _)| f.clone()).find(|f| {
+                let p = Path::new(f);
+                p.with_extension("").to_string_lossy() == stem && !p.extension().is_some_and(|e| e.eq_ignore_ascii_case("xmp"))
+            })
+        }
+    }
+
+    fn file_photo(id: u64, path: &str) -> Photo {
+        let name = Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        Photo::new(PhotoId(id), Source::File { path: path.into() }, &name, "JPG", 1, 1, "2026-01-01T00:00:00")
+    }
+
+    /// Issue #95: a case-only rename is a real change on a case-insensitive volume and never
+    /// replaces a different file that differs only by case on a case-sensitive one.
+    #[test]
+    fn case_only_renames_never_replace_another_file() {
+        // case-sensitive: IMG_1.JPG and img_1.JPG are two photos
+        let fs = FakeFs::new(false, &[("/p/IMG_1.JPG", "first"), ("/p/img_1.JPG", "second"), ("/p/IMG_1.xmp", "sc1"), ("/p/img_1.xmp", "sc2")]);
+        assert!(move_file_with(&fs, "/p/IMG_1.JPG", "/p/img_1.JPG").unwrap_err().message.contains("already exists"));
+        assert_eq!(fs.listing().len(), 4);
+        assert!(fs.listing().contains(&("/p/img_1.JPG".into(), "second".into())));
+        // the planner picks a free name instead
+        let mut s = Session::new();
+        s.catalog.apply(Op::AddPhoto { photo: Box::new(file_photo(1, "/p/IMG_1.JPG")) }).unwrap();
+        let plans = s.plan_rename_with(&fs, &[PhotoId(1)], "img_1", 1);
+        assert_eq!(plans[0].to, "img_1-1.JPG");
+        move_file_with(&fs, "/p/IMG_1.JPG", plans[0].to_path.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            fs.listing(),
+            vec![
+                ("/p/img_1-1.JPG".into(), "first".into()),
+                ("/p/img_1-1.xmp".into(), "sc1".into()),
+                ("/p/img_1.JPG".into(), "second".into()),
+                ("/p/img_1.xmp".into(), "sc2".into())
+            ]
+        );
+        // case-sensitive, target free: a plain rename
+        let fs = FakeFs::new(false, &[("/p/IMG_2.JPG", "x")]);
+        move_file_with(&fs, "/p/IMG_2.JPG", "/p/img_2.JPG").unwrap();
+        assert_eq!(fs.listing(), vec![("/p/img_2.JPG".into(), "x".into())]);
+
+        // case-insensitive: the "existing" target is the photo itself → renamed via a temp name
+        let fs = FakeFs::new(true, &[("/p/IMG_1.JPG", "first"), ("/p/IMG_1.xmp", "sc1")]);
+        let mut s = Session::new();
+        s.catalog.apply(Op::AddPhoto { photo: Box::new(file_photo(1, "/p/IMG_1.JPG")) }).unwrap();
+        let plans = s.plan_rename_with(&fs, &[PhotoId(1)], "img_1", 1);
+        assert_eq!(plans[0].to, "img_1.JPG", "not a collision with itself");
+        move_file_with(&fs, "/p/IMG_1.JPG", "/p/img_1.JPG").unwrap();
+        assert_eq!(fs.listing(), vec![("/p/img_1.JPG".into(), "first".into()), ("/p/img_1.xmp".into(), "sc1".into())]);
+        // case-insensitive, another file under another name: still a collision
+        let fs = FakeFs::new(true, &[("/p/A.JPG", "a"), ("/p/b.JPG", "b")]);
+        assert!(move_file_with(&fs, "/p/A.JPG", "/p/B.JPG").is_err());
+    }
+
+    /// Issue #105: a rollback that fails is reported, and the library follows the files that kept
+    /// their new names (an undoable partial rename), so nothing goes missing.
+    #[test]
+    fn failed_rollbacks_are_reported_and_followed() {
+        let fs = FakeFs::new(false, &[("/p/a.jpg", "A"), ("/p/a.xmp", "As"), ("/p/b.jpg", "B"), ("/p/c.jpg", "C")]);
+        let mut s = Session::new();
+        for (i, f) in ["/p/a.jpg", "/p/b.jpg", "/p/c.jpg"].iter().enumerate() {
+            s.catalog.apply(Op::AddPhoto { photo: Box::new(file_photo(i as u64 + 1, f)) }).unwrap();
+        }
+        let ids = [PhotoId(1), PhotoId(2), PhotoId(3)];
+        let plans = s.plan_rename_with(&fs, &ids, "Trip-{seq}", 1);
+        // c can't be renamed (the share went away), and neither can Trip-1 be moved back
+        fs.fail.borrow_mut().extend(["c.jpg".to_string(), "Trip-1".to_string()]);
+        let err = s.apply_rename_with(&fs, &plans).unwrap_err().to_string();
+        assert!(err.contains("rename /p/c.jpg"), "{err}");
+        assert!(err.contains("/p/Trip-1.jpg could not be moved back"), "{err}");
+        assert!(err.contains("/p/a.jpg → /p/Trip-1.jpg"), "lists what stayed renamed: {err}");
+        assert_eq!(
+            fs.listing(),
+            vec![
+                ("/p/Trip-1.jpg".into(), "A".into()),
+                ("/p/Trip-1.xmp".into(), "As".into()),
+                ("/p/b.jpg".into(), "B".into()),
+                ("/p/c.jpg".into(), "C".into())
+            ]
+        );
+        // the catalog matches the disk
+        let path = |s: &Session, id: u64| match &s.catalog.photo(PhotoId(id)).unwrap().source {
+            Source::File { path } => path.clone(),
+            Source::Demo { .. } => String::new(),
+        };
+        assert_eq!(path(&s, 1), "/p/Trip-1.jpg");
+        assert_eq!(s.catalog.photo(PhotoId(1)).unwrap().file_name, "Trip-1.jpg");
+        assert_eq!((path(&s, 2), path(&s, 3)), ("/p/b.jpg".into(), "/p/c.jpg".into()));
+        assert_eq!(s.undo.last().map(|e| e.label.as_str()), Some("Rename 1 Photo (partly)"));
+
+        // a sidecar that won't move, and a file that won't go back: the file keeps its new name
+        // with the sidecars that did move, and says so
+        let fs = FakeFs::new(false, &[("/p/d.jpg", "D"), ("/p/d.xmp", "Ds"), ("/p/d.jpg.xmp", "Df")]);
+        fs.fail.borrow_mut().extend(["d.jpg.xmp".to_string(), "/p/e.jpg".to_string()]);
+        let e = move_file_with(&fs, "/p/d.jpg", "/p/e.jpg").unwrap_err();
+        assert!(e.moved, "{e}");
+        assert!(e.message.contains("it is now /p/e.jpg with its sidecar /p/e.xmp"), "{e}");
+        assert_eq!(fs.listing(), vec![("/p/d.jpg.xmp".into(), "Df".into()), ("/p/e.jpg".into(), "D".into()), ("/p/e.xmp".into(), "Ds".into())]);
+        // … and when the file does go back, its sidecars follow it
+        let fs = FakeFs::new(false, &[("/p/d.jpg", "D"), ("/p/d.xmp", "Ds"), ("/p/d.jpg.xmp", "Df")]);
+        fs.fail.borrow_mut().push("d.jpg.xmp".to_string());
+        let e = move_file_with(&fs, "/p/d.jpg", "/p/e.jpg").unwrap_err();
+        assert!(!e.moved);
+        assert_eq!(fs.listing().len(), 3);
+        assert!(fs.listing().iter().all(|(p, _)| p.starts_with("/p/d.")));
+    }
+
+    /// Issue #92 (comment): renaming one of `IMG_1.CR3` + `IMG_1.JPG` copies their shared
+    /// `IMG_1.xmp` instead of taking it away from the other; the last one renamed takes it.
+    #[test]
+    fn shared_stem_sidecar_is_copied_not_taken() {
+        let fs = FakeFs::new(false, &[("/p/IMG_1.CR3", "raw"), ("/p/IMG_1.JPG", "jpg"), ("/p/IMG_1.xmp", "shared"), ("/p/IMG_1.CR3.xmp", "own")]);
+        move_file_with(&fs, "/p/IMG_1.CR3", "/p/Trip_1.CR3").unwrap();
+        assert_eq!(
+            fs.listing(),
+            vec![
+                ("/p/IMG_1.JPG".into(), "jpg".into()),
+                ("/p/IMG_1.xmp".into(), "shared".into()),
+                ("/p/Trip_1.CR3".into(), "raw".into()),
+                ("/p/Trip_1.CR3.xmp".into(), "own".into()),
+                ("/p/Trip_1.xmp".into(), "shared".into()),
+            ]
+        );
+        // the JPEG is the last one using it: it moves
+        move_file_with(&fs, "/p/IMG_1.JPG", "/p/Trip_2.JPG").unwrap();
+        assert!(fs.listing().contains(&("/p/Trip_2.xmp".into(), "shared".into())));
+        assert!(!fs.exists(Path::new("/p/IMG_1.xmp")));
+        // a failure after the copy removes the copy and keeps the original
+        let fs = FakeFs::new(false, &[("/p/A.CR3", "raw"), ("/p/A.JPG", "jpg"), ("/p/A.xmp", "shared"), ("/p/A.CR3.xmp", "own")]);
+        fs.fail.borrow_mut().push("A.CR3.xmp".into());
+        assert!(move_file_with(&fs, "/p/A.CR3", "/p/B.CR3").is_err());
+        assert_eq!(fs.listing().len(), 4);
+        assert!(fs.listing().contains(&("/p/A.xmp".into(), "shared".into())) && !fs.exists(Path::new("/p/B.xmp")));
+    }
+
+    /// Issue #95 on the real disk, whichever kind of volume the temp folder is on.
+    #[test]
+    fn case_only_rename_on_disk() {
+        let dir = std::env::temp_dir().join(format!("lc-rename-case-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (upper, lower) = (dir.join("IMG_1.JPG"), dir.join("img_1.JPG"));
+        std::fs::write(&upper, b"first").unwrap();
+        let case_sensitive = !lower.exists();
+        let p = |q: &Path| q.to_string_lossy().to_string();
+        if case_sensitive {
+            std::fs::write(&lower, b"second").unwrap();
+            assert!(move_file(&p(&upper), &p(&lower)).is_err());
+            assert_eq!(std::fs::read(&lower).unwrap(), b"second");
+            assert_eq!(std::fs::read(&upper).unwrap(), b"first");
+        } else {
+            move_file(&p(&upper), &p(&lower)).unwrap();
+            let names: Vec<String> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect();
+            assert_eq!(names, vec!["img_1.JPG".to_string()]);
+            assert_eq!(std::fs::read(&lower).unwrap(), b"first");
+        }
+        // a plain rename never replaces
+        std::fs::write(dir.join("other.JPG"), b"other").unwrap();
+        assert!(move_file(&p(&dir.join("other.JPG")), &p(&lower)).is_err());
+        assert_eq!(std::fs::read(dir.join("other.JPG")).unwrap(), b"other");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn folder_templates_stay_inside_the_destination() {

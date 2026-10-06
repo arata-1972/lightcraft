@@ -5,7 +5,7 @@
 //! `edit.*` (undo/redo), and queries (`catalog.query`, `photo.inspect`, `develop.get`…).
 
 mod before;
-mod browse;
+pub(crate) mod browse;
 mod color;
 pub(crate) mod convert;
 mod cull;
@@ -15,7 +15,7 @@ mod edit;
 mod export;
 pub mod filters;
 pub mod keywords;
-mod library;
+pub mod library;
 pub mod lut_profiles;
 pub mod manage;
 mod masks;

@@ -163,6 +163,50 @@ fn a_failed_or_corrupt_copy_keeps_the_source() {
     }
 }
 
+/// Issue #96: Import → Copy used a plain unverified copy (and check-then-copy naming that could
+/// replace a file). It now gets the same verified copy as Move: a copy that fails or comes out
+/// different is removed and reported as a failed import, nothing is catalogued, and the card
+/// is untouched; a good copy never replaces an existing file.
+#[test]
+fn copy_import_verifies_each_copy() {
+    let import_copy = |s: &mut Session, card: &Path, dest: &Path| {
+        s.execute(
+            "library.import",
+            &json!({"paths": [card.to_string_lossy()], "mode": "copy", "destination": dest.to_string_lossy(), "organize": "flat"}),
+        )
+        .unwrap()
+    };
+    for fault in [Fault::FailWrite, Fault::Corrupt] {
+        let base = temp_dir(&format!("copyfail-{fault:?}"));
+        let (card, dest) = (base.join("card"), base.join("out"));
+        write_png(&card.join("a.png"), 3);
+        let bytes = std::fs::read(card.join("a.png")).unwrap();
+        let mut s = session();
+        inject(fault);
+        let r = import_copy(&mut s, &card, &dest);
+        inject(Fault::None);
+        assert_eq!(len(&r, "failed"), 1, "{fault:?}: {r}");
+        assert_eq!(len(&r, "imported"), 0, "{fault:?}: {r}");
+        assert!(r.to_string().contains("the original is untouched"), "{r}");
+        assert_eq!(s.catalog.len(), 0);
+        assert_eq!(std::fs::read(card.join("a.png")).unwrap(), bytes, "{fault:?}: source intact");
+        assert_eq!(files_under(&dest), Vec::<String>::new(), "{fault:?}: no bad copy left");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+    // a good copy: verified, and a taken name gets -1 instead of being replaced
+    let base = temp_dir("copyok");
+    let (card, dest) = (base.join("card"), base.join("out"));
+    write_png(&card.join("a.png"), 4);
+    std::fs::create_dir_all(&dest).unwrap();
+    std::fs::write(dest.join("a.png"), b"someone else's file").unwrap();
+    let mut s = session();
+    let r = import_copy(&mut s, &card, &dest);
+    assert_eq!(len(&r, "imported"), 1, "{r}");
+    assert_eq!(std::fs::read(dest.join("a.png")).unwrap(), b"someone else's file");
+    assert_eq!(std::fs::read(dest.join("a-1.png")).unwrap(), std::fs::read(card.join("a.png")).unwrap());
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 /// A source that can't be removed (a read-only card) stays and is reported; the photo is
 /// imported from its copy.
 #[test]

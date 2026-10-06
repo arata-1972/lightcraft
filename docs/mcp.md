@@ -15,7 +15,10 @@ It runs in one of two modes:
 
 Options: `--library DIR` opens (or creates) a persistent LightCraft library — the same crash-safe
 format the desktop app uses (`~/Pictures/LightCraft Library` by default there) — so ratings, edits and albums
-survive between sessions (with `--demo`, a new library is seeded with the demo photos);
+survive between sessions (with `--demo`, a new library is seeded with the demo photos). A library
+is open in one program at a time (`catalog.lock` in the library folder): while the desktop app has
+it open, `--library` on the same folder fails with "This library is already open in LightCraft
+(process N …)" — use connect mode to work with the running app instead;
 `--demo` starts the headless session with the procedurally generated demo library;
 `--compact` lists only the helper tools (see below). In connect mode the server starts even when
 the app is not running yet and connects on the first call (and reconnects if the app restarts).

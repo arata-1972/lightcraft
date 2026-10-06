@@ -352,9 +352,9 @@ fn image_result(file: &std::path::Path, max: Option<u32>, format: &str, save_to:
         (bytes, w, h)
     };
     if let Some(p) = save_to
-        && let Err(e) = std::fs::write(p, &bytes)
+        && let Err(e) = lightcraft_engine::export::write_file(p, &bytes)
     {
-        return ToolResult::error(format!("{p}: {e}"));
+        return ToolResult::error(e);
     }
     let mime = if jpeg { "image/jpeg" } else { "image/png" };
     let mut info = meta;
@@ -372,7 +372,18 @@ fn image_result(file: &std::path::Path, max: Option<u32>, format: &str, save_to:
     }
 }
 
+/// A user-given `path` to save to must not be a photo's original (or its sidecar).
+fn check_save_path(b: &mut dyn Backend, args: &Value) -> Result<(), String> {
+    match args.get("path").and_then(Value::as_str) {
+        Some(p) => exec(b, "export.checkTarget", json!({"path": p})).map(|_| ()),
+        None => Ok(()),
+    }
+}
+
 fn render_photo(b: &mut dyn Backend, args: &Value) -> ToolResult {
+    if let Err(e) = check_save_path(b, args) {
+        return ToolResult::error(e);
+    }
     let size = args.get("size").and_then(Value::as_u64).unwrap_or(1024).clamp(16, 4096);
     let id = match args.get("id").and_then(Value::as_u64) {
         Some(id) => Some(id),
@@ -394,6 +405,9 @@ fn render_photo(b: &mut dyn Backend, args: &Value) -> ToolResult {
 }
 
 fn screenshot(b: &mut dyn Backend, args: &Value) -> ToolResult {
+    if let Err(e) = check_save_path(b, args) {
+        return ToolResult::error(e);
+    }
     let file = temp_path("screenshot");
     let path = file.to_string_lossy().to_string();
     match b.call("ui.screenshot", json!({"path": path})) {

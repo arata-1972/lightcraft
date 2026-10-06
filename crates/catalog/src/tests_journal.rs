@@ -283,7 +283,12 @@ fn streamed_snapshot_keeps_the_on_disk_format() {
     let (mut j, c, _) = open(&m);
     assert_eq!(c.to_snapshot(), full.to_snapshot());
     j.snapshot(&c).unwrap();
-    let legacy = format!("{{\"format\":\"lightcraft-catalog\",\"version\":1,\"seq\":{},\"catalog\":{}}}\n", j.seq(), c.to_snapshot());
+    let legacy = format!(
+        "{{\"format\":\"lightcraft-catalog\",\"version\":{},\"seq\":{},\"catalog\":{}}}\n",
+        crate::journal::VERSION,
+        j.seq(),
+        c.to_snapshot()
+    );
     assert_eq!(String::from_utf8(m.get(SNAPSHOT).unwrap()).unwrap(), legacy);
     assert_eq!(j.stats().last_snapshot.bytes, legacy.len() as u64);
 

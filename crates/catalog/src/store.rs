@@ -28,9 +28,12 @@ pub trait Store: Send {
         self.write_atomic(name, &buf)?;
         Ok(buf.len() as u64)
     }
-    /// Append and make durable (fsync) before returning.
+    /// Append and make durable (fsync) before returning. On an error, part of `data` may have
+    /// been written (a full disk, a dropped network share): the journal cuts the file back to its
+    /// previous length with [`Store::truncate`] before appending again.
     fn append(&mut self, name: &str, data: &[u8]) -> io::Result<()>;
-    /// Cut a file to `len` bytes (drop a torn tail before appending again).
+    /// Cut a file to `len` bytes (drop a torn tail before appending again). A missing file is
+    /// left missing.
     fn truncate(&mut self, name: &str, len: u64) -> io::Result<()>;
     /// Human-readable location (diagnostics).
     fn describe(&self) -> String;
@@ -132,15 +135,26 @@ impl Store for FsStore {
             self.appender = Some((name.to_string(), f));
         }
         let Some((_, f)) = self.appender.as_mut() else { return Err(io::Error::other("appender not open")) };
-        f.write_all(data)?;
-        f.sync_data()
+        let written = f.write_all(data).and_then(|()| f.sync_data());
+        if written.is_err() {
+            // The handle may be dead (a network share that reconnected, a removed volume): the next
+            // attempt reopens the file. Part of `data` may be in the file; the caller cuts it back
+            // ([`Store::truncate`]) before appending again.
+            self.appender = None;
+        }
+        written
     }
 
     fn truncate(&mut self, name: &str, len: u64) -> io::Result<()> {
         if self.appender.as_ref().is_some_and(|(n, _)| n == name) {
             self.appender = None;
         }
-        let f = std::fs::OpenOptions::new().write(true).open(self.path(name))?;
+        let f = match std::fs::OpenOptions::new().write(true).open(self.path(name)) {
+            Ok(f) => f,
+            // nothing to cut (an append that failed before creating the file)
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e),
+        };
         f.set_len(len)?;
         f.sync_all()
     }

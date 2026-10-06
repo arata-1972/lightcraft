@@ -19,6 +19,7 @@ const FIELDS: &[(&str, usize)] = &[
     ("CURVES", 1),
     ("GAIN", 1),
     ("EV", 1),
+    ("CAMERA_RGB_TONE", 1),
     ("AIR", 1),
     ("AIR_PRE", 1),
     ("HL", 1),
@@ -165,6 +166,7 @@ pub fn finish_block(fp: &FinishParams, masks: &[[f32; MASK_TERMS]], present: &Pr
     p.f("REFINE_SAT", fp.refine_sat);
     p.f("GAIN", fp.gain);
     p.f("EV", fp.ev);
+    p.b("CAMERA_RGB_TONE", fp.camera_rgb_tone);
     p.f("AIR", fp.air);
     p.f("AIR_PRE", fp.air_pre);
     p.f("HL", fp.hl);

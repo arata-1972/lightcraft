@@ -96,5 +96,18 @@ pub fn specs() -> Vec<CommandSpec> {
             save
         ),
         cmd!("export.deletePreset", "Delete Export Preset", [], None, "{name} — removes a user preset → presets", always, delete),
+        cmd!(
+            query "export.checkTarget",
+            "Check Output Path",
+            [],
+            None,
+            "{path} — fails when writing `path` would replace a photo's original (or its XMP sidecar) in the library; front ends call it before saving a render or screenshot to a user-given path → {path}",
+            always,
+            |s, p| {
+                let path = p.get("path").and_then(Value::as_str).ok_or_else(|| bad("export.checkTarget", "missing `path`"))?;
+                s.check_write_target(path).map_err(|e| bad("export.checkTarget", e))?;
+                Ok(json!({"path": path}))
+            }
+        ),
     ]
 }

@@ -10,6 +10,7 @@
 //! run them off the UI thread.
 #![forbid(unsafe_code)]
 
+pub mod availability;
 mod camera_preview;
 pub mod cmd;
 pub mod crs;
@@ -25,6 +26,7 @@ pub mod library;
 pub mod media;
 pub mod memory;
 pub mod merge;
+pub mod originals;
 pub mod preset_import;
 pub mod preset_luminar;
 pub mod presets;
@@ -57,6 +59,9 @@ pub enum EngineError {
     /// be written. They stay queued and are written by the next successful save.
     #[error("saved in memory but not written to disk: {0}; LightCraft will retry")]
     NotSaved(String),
+    /// Another process (the app, `lightcraft-cli`, another computer) has the library open.
+    #[error("{0}")]
+    LibraryInUse(String),
     #[error("{0}")]
     Other(String),
 }
@@ -68,6 +73,22 @@ pub type Result<T> = std::result::Result<T, EngineError>;
 pub struct UndoEntry {
     pub label: String,
     pub op: Op,
+    /// A folder to rename on disk (`from` → `to`) before `op` is applied: Rename / Move Folder
+    /// (whose `op` relinks the photos inside). Never overwrites; refused when `to` exists.
+    pub folder: Option<FolderMove>,
+}
+
+/// A folder renamed or moved on disk as part of an undo step.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FolderMove {
+    pub from: String,
+    pub to: String,
+}
+
+impl FolderMove {
+    fn reversed(&self) -> Self {
+        Self { from: self.to.clone(), to: self.from.clone() }
+    }
 }
 
 /// An in-progress slider drag / brush stroke: one undo step when it ends.
@@ -253,11 +274,22 @@ impl Session {
         (spec.enabled)(self).map_err(|why| EngineError::Disabled(id.to_string(), why))?;
         let empty = Value::Object(Default::default());
         let params = if params.is_null() { &empty } else { params };
+        self.run_command(id, spec.journal.then_some(params), |s| (spec.run)(s, params))
+    }
+
+    /// Run `f` as command `id` with what [`Session::execute`] does around every command: the
+    /// panic guard, auto versions, XMP sidecar auto-write and the durable save (a failed save is
+    /// `NotSaved`). Not journaled. The app's import task commits its batches this way.
+    pub fn execute_fn(&mut self, id: &str, f: impl FnOnce(&mut Session) -> Result<Value>) -> Result<Value> {
+        self.run_command(id, None, f)
+    }
+
+    fn run_command(&mut self, id: &str, journal: Option<&Value>, f: impl FnOnce(&mut Session) -> Result<Value>) -> Result<Value> {
         let log_start = self.pending_log.len();
         let was_active = self.active();
         self.depth += 1;
         // last-resort guard: a panic in a command is that command's error, not a crash
-        let r = guard::catch(&format!("`{id}`"), || (spec.run)(self, params)).unwrap_or_else(|e| Err(EngineError::Other(e)));
+        let r = guard::catch(&format!("`{id}`"), || f(self)).unwrap_or_else(|e| Err(EngineError::Other(e)));
         self.depth -= 1;
         if self.depth == 0 && was_active.is_some() && self.active() != was_active {
             self.previous_active = was_active;
@@ -265,7 +297,10 @@ impl Session {
                 self.auto_version(left);
             }
         }
-        if r.is_ok() && spec.journal && self.depth == 0 {
+        if r.is_ok()
+            && let Some(params) = journal
+            && self.depth == 0
+        {
             self.journal.push((id.to_string(), params.clone()));
             if self.journal.len() > 10_000 {
                 self.journal.drain(..1000);
@@ -302,11 +337,21 @@ impl Session {
         let fwd = op.clone();
         let inv = self.catalog.apply(op)?;
         self.pending_log.push(fwd);
-        self.undo.push(UndoEntry { label: label.to_string(), op: inv });
+        self.undo.push(UndoEntry { label: label.to_string(), op: inv, folder: None });
         if self.undo.len() > 1000 {
             self.undo.remove(0);
         }
         self.redo.clear();
+        Ok(())
+    }
+
+    /// [`Session::commit`] for an op that goes with a folder already renamed on disk; the undo
+    /// step renames it back (`folder` is the undo direction: current place → old place).
+    pub(crate) fn commit_with_folder(&mut self, label: &str, op: Op, folder: FolderMove) -> Result<()> {
+        self.commit(label, op)?;
+        if let Some(e) = self.undo.last_mut() {
+            e.folder = Some(folder);
+        }
         Ok(())
     }
 
@@ -340,9 +385,13 @@ impl Session {
         if n < 2 || n > self.undo.len() {
             return;
         }
+        // a step that moves a folder on disk stays on its own
+        if self.undo[self.undo.len() - n..].iter().any(|e| e.folder.is_some()) {
+            return;
+        }
         let tail = self.undo.split_off(self.undo.len() - n);
         let ops = tail.into_iter().rev().map(|e| e.op).collect();
-        self.undo.push(UndoEntry { label: label.to_string(), op: Op::Batch { ops } });
+        self.undo.push(UndoEntry { label: label.to_string(), op: Op::Batch { ops }, folder: None });
     }
 
     /// Apply without recording undo (interactive previews).
@@ -353,7 +402,7 @@ impl Session {
 
     pub fn undo_step(&mut self) -> Result<String> {
         let e = self.undo.pop().ok_or_else(|| EngineError::Other("nothing to undo".into()))?;
-        let redo = match self.apply_with_files(&e.op) {
+        let redo = match self.apply_with_files(&e.op, e.folder.as_ref()) {
             Ok(r) => r,
             Err(err) => {
                 self.undo.push(e);
@@ -361,13 +410,13 @@ impl Session {
             }
         };
         self.pending_log.push(e.op);
-        self.redo.push(UndoEntry { label: e.label.clone(), op: redo });
+        self.redo.push(UndoEntry { label: e.label.clone(), op: redo, folder: e.folder.as_ref().map(FolderMove::reversed) });
         Ok(e.label)
     }
 
     pub fn redo_step(&mut self) -> Result<String> {
         let e = self.redo.pop().ok_or_else(|| EngineError::Other("nothing to redo".into()))?;
-        let undo = match self.apply_with_files(&e.op) {
+        let undo = match self.apply_with_files(&e.op, e.folder.as_ref()) {
             Ok(r) => r,
             Err(err) => {
                 self.redo.push(e);
@@ -375,19 +424,44 @@ impl Session {
             }
         };
         self.pending_log.push(e.op);
-        self.undo.push(UndoEntry { label: e.label.clone(), op: undo });
+        self.undo.push(UndoEntry { label: e.label.clone(), op: undo, folder: e.folder.as_ref().map(FolderMove::reversed) });
         Ok(e.label)
     }
 
-    /// Apply an undo/redo op, first moving the files its renames imply (all or nothing).
-    fn apply_with_files(&mut self, op: &Op) -> Result<Op> {
+    /// Apply an undo/redo op, first renaming the step's folder and moving the files its renames
+    /// imply (all or nothing). Files that can't be moved back after a failure are reported and the
+    /// library follows them (a logged change outside the undo history), so none goes missing; the
+    /// folder is only moved back when no file was left behind at its new path.
+    fn apply_with_files(&mut self, op: &Op, folder: Option<&FolderMove>) -> Result<Op> {
+        let fs = rename::RealFs;
+        if let Some(f) = folder {
+            cmd::browse::rename_folder_on_disk(&f.from, &f.to).map_err(|e| EngineError::Other(format!("can't move the folder back: {e}")))?;
+        }
+        let undo_folder = || {
+            if let Some(f) = folder {
+                let _ = cmd::browse::rename_folder_on_disk(&f.to, &f.from);
+            }
+        };
         let moves = self.file_moves(op);
-        Session::move_files(&moves)?;
+        if let Err(e) = rename::move_all(&fs, &moves) {
+            if e.stuck.is_empty() {
+                undo_folder();
+            }
+            return Err(EngineError::Other(format!("can't move the files back: {}", self.follow_stuck(op, e, false))));
+        }
         match self.catalog.apply(op.clone()) {
-            Ok(inv) => Ok(inv),
+            Ok(inv) => {
+                if let Some(f) = folder {
+                    cmd::browse::follow_folder(self, &f.from, &f.to);
+                }
+                Ok(inv)
+            }
             Err(e) => {
                 let back: Vec<(String, String)> = moves.iter().rev().map(|(a, b)| (b.clone(), a.clone())).collect();
-                let _ = Session::move_files(&back);
+                if let Err(be) = rename::move_all(&fs, &back) {
+                    return Err(EngineError::Other(format!("{e}; the files could not all be moved back: {}", be.message)));
+                }
+                undo_folder();
                 Err(e.into())
             }
         }
@@ -502,7 +576,11 @@ impl Session {
 
     /// Photos shown in the grid/filmstrip for the current source, filter and sort.
     pub fn visible(&mut self) -> &[PhotoId] {
-        let key = (self.catalog.revision, format!("{:?}|{:?}|{:?}|{:?}", self.source, self.filter, self.sort, self.browse));
+        let mut key = (self.catalog.revision, format!("{:?}|{:?}|{:?}|{:?}", self.source, self.filter, self.sort, self.browse));
+        if self.source == LibrarySource::Missing && self.media.availability.is_background() {
+            // the view fills in as the background checks find files gone
+            key.1.push_str(&format!("|{}", self.media.availability.generation()));
+        }
         if self.visible_key.as_ref() != Some(&key) {
             // "in the last N days" rules count back from the session's clock
             lightcraft_catalog::rules::set_now(Some((self.clock)()));
@@ -537,8 +615,8 @@ impl Session {
             }
             if self.source == LibrarySource::Missing {
                 // only the photos the query kept (library photos, not Local browse records) are checked
-                let cat = &self.catalog;
-                visible.retain(|id| cmd::missing::is_missing(cat, *id));
+                let (cat, avail) = (&self.catalog, &self.media.availability);
+                visible.retain(|id| cmd::missing::is_missing(cat, avail, *id));
             }
             if self.source != LibrarySource::RecentlyDeleted {
                 visible = self.catalog.arrange_stacks(&visible);
@@ -634,6 +712,8 @@ mod tests_organize;
 mod tests_persist;
 #[cfg(test)]
 mod tests_prefs;
+#[cfg(test)]
+mod tests_settings_files;
 #[cfg(test)]
 mod tests_spots;
 #[cfg(test)]

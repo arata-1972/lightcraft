@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 
-use crate::{Headless, PROTOCOL_VERSION, Server, call_tool, command_tool_name};
+use crate::{Backend, Headless, PROTOCOL_VERSION, Server, call_tool, command_tool_name};
 
 fn server() -> Server {
     Server::new(Box::new(Headless::demo()))
@@ -89,6 +89,34 @@ fn import_tool_copies_with_a_folder_template() {
     let r = call_tool(&mut b, "import", &args);
     assert!(!r.is_error, "{r:?}");
     assert!(dest.join("2026").join("20260114").join("a.png").is_file());
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// Issue #93: `render_photo`, `ui.render` and `app.export` with an exact `path` must not replace
+/// a photo's original.
+#[test]
+fn path_writes_never_replace_an_original() {
+    let base = std::env::temp_dir().join(format!("lc-mcp-guard-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let img = lightcraft_raster::Rgba8 { width: 8, height: 8, data: vec![[90, 30, 9, 255]; 64] };
+    let png = lightcraft_codecs::encode_png(&lightcraft_codecs::EncodeImage::rgba8(&img), &lightcraft_codecs::EncodeMeta::default()).unwrap();
+    let orig = base.join("a.png");
+    std::fs::write(&orig, &png).unwrap();
+    let mut b = Headless::demo();
+    let r = call_tool(&mut b, "import", &json!({"paths": [orig.to_string_lossy()]}));
+    assert!(!r.is_error, "{r:?}");
+    let id = b.session.catalog.photos().find(|p| p.file_name == "a.png").unwrap().id.0;
+    let path = orig.to_string_lossy().to_string();
+    let r = call_tool(&mut b, "render_photo", &json!({"id": id, "path": path}));
+    assert!(r.is_error, "{r:?}");
+    assert!(b.call("ui.render", json!({"id": id, "path": path})).unwrap_err().contains("original"));
+    let e = b.call("app.export", json!({"ids": [id], "path": path})).unwrap_err();
+    assert!(e.contains("never writes over an original"), "{e}");
+    assert_eq!(std::fs::read(&orig).unwrap(), png, "the original is untouched");
+    // another path still works
+    let r = call_tool(&mut b, "render_photo", &json!({"id": id, "path": base.join("render.png").to_string_lossy()}));
+    assert!(!r.is_error, "{r:?}");
     let _ = std::fs::remove_dir_all(&base);
 }
 

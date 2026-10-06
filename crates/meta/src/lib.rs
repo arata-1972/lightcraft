@@ -17,6 +17,7 @@ mod gpx;
 mod iptc;
 pub mod tags;
 mod xmp;
+mod xmp_merge;
 
 pub use container::{Embedded, embedded, jpeg_segments, png_chunks, webp_chunks};
 pub use datetime::DateTime;
@@ -26,6 +27,7 @@ pub use iptc::parse_iptc;
 pub use lightcraft_geom::Orientation;
 pub use tags::{TagRow, file_tag_rows, tag_rows};
 pub use xmp::{CRS_NS, LC_NS, XmpData, XmpError, XmpValue, parse_xmp, write_xmp, write_xmp_lc};
+pub use xmp_merge::{MergeRules, merge_xmp};
 
 use serde::{Deserialize, Serialize};
 

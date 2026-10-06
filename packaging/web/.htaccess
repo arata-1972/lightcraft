@@ -6,11 +6,10 @@ AddType text/javascript .js
   AddOutputFilterByType DEFLATE application/wasm text/javascript text/html
 </IfModule>
 
+# The file names don't change between versions: revalidate them (no `immutable`), or an upgrade
+# could leave browsers with an old module, or old glue next to a new module.
 <IfModule mod_headers.c>
-  <FilesMatch "\.(wasm|js)$">
-    Header set Cache-Control "public, max-age=31536000, immutable"
-  </FilesMatch>
-  <FilesMatch "^index\.html$">
+  <FilesMatch "\.(wasm|js|html)$">
     Header set Cache-Control "no-cache"
   </FilesMatch>
 </IfModule>

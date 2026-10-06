@@ -7,6 +7,53 @@ use crate::LightcraftApp;
 use crate::state::Dialog;
 use crate::theme::Tokens;
 
+/// Rows the Rename dialog previews.
+const RENAME_PREVIEW_ROWS: usize = 6;
+
+/// The Rename dialog's preview: its first rows (`None` while being planned) and how many files
+/// are renamed. Which names are taken is checked on disk, which can block on a slow drive, so the
+/// rows are planned on a worker thread, and only when the template, start number, photos or
+/// catalog change — never once per frame.
+pub(crate) fn rename_preview(
+    app: &mut LightcraftApp,
+    ctx: &egui::Context,
+    template: &str,
+    start: usize,
+) -> (Option<Vec<lightcraft_engine::rename::RenamePlan>>, usize) {
+    use std::hash::{Hash, Hasher};
+    type Rows = std::sync::Arc<std::sync::Mutex<Option<Vec<lightcraft_engine::rename::RenamePlan>>>>;
+    let ids = app.session.targets(&json!({}));
+    let photos = lightcraft_engine::rename::rename_photos(&app.session.catalog, &ids);
+    let total = photos.len();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (template, start, app.session.catalog.revision, &ids).hash(&mut h);
+    let key = h.finish();
+    let id = egui::Id::new("rename-preview-rows");
+    let read = |rows: &Rows| rows.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+    if let Some((k, rows)) = ctx.data(|d| d.get_temp::<(u64, Rows)>(id))
+        && k == key
+    {
+        return (read(&rows), total);
+    }
+    let rows: Rows = Default::default();
+    let first: Vec<_> = photos.into_iter().take(RENAME_PREVIEW_ROWS).collect();
+    let (out, template, repaint) = (rows.clone(), template.to_string(), ctx.clone());
+    let exists = app.session.media.availability.probe();
+    let work = move || {
+        let plans = lightcraft_engine::rename::plan_rename_photos(&first, &template, start, &|f| exists(f));
+        *out.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(plans);
+        repaint.request_repaint();
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Err(e) = std::thread::Builder::new().name("lc-rename-preview".into()).spawn(work) {
+        log::warn!("rename preview: {e}");
+    }
+    #[cfg(target_arch = "wasm32")]
+    work();
+    ctx.data_mut(|d| d.insert_temp(id, (key, rows.clone())));
+    (read(&rows), total)
+}
+
 /// Help ▸ What's New (docs/whats-new.md).
 pub const WHATS_NEW: &str = include_str!("../../../../docs/whats-new.md");
 
@@ -316,16 +363,23 @@ pub fn show(app: &mut LightcraftApp, ctx: &egui::Context) {
                         egui::RichText::new(crate::i18n::tr("Tags: see Tags beside the template. Files are renamed on disk (with their XMP sidecars); existing names get -1, -2…"))
                             .color(t.text_dim),
                     );
-                    let preview = app.session.execute("photo.renamePreview", &json!({"template": template, "start": start})).unwrap_or_default();
-                    egui::Grid::new("rename-preview").num_columns(3).spacing([8.0, 2.0]).show(ui, |ui| {
-                        for pl in preview.as_array().into_iter().flatten().take(6) {
-                            ui.label(egui::RichText::new(pl["from"].as_str().unwrap_or("")).color(t.text_dim));
-                            ui.label(egui::RichText::new("→").color(t.text_dim));
-                            ui.label(egui::RichText::new(pl["to"].as_str().unwrap_or("")).color(t.text));
-                            ui.end_row();
+                    let (preview, total) = rename_preview(app, ui.ctx(), template, *start as usize);
+                    match &preview {
+                        Some(rows) => {
+                            egui::Grid::new("rename-preview").num_columns(3).spacing([8.0, 2.0]).show(ui, |ui| {
+                                for pl in rows {
+                                    ui.label(egui::RichText::new(&pl.from).color(t.text_dim));
+                                    ui.label(egui::RichText::new("→").color(t.text_dim));
+                                    ui.label(egui::RichText::new(&pl.to).color(t.text));
+                                    ui.end_row();
+                                }
+                            });
                         }
-                    });
-                    let more = preview.as_array().map_or(0, Vec::len).saturating_sub(6);
+                        None => {
+                            ui.label(egui::RichText::new("Checking names…").color(t.text_dim));
+                        }
+                    }
+                    let more = total.saturating_sub(RENAME_PREVIEW_ROWS);
                     if more > 0 {
                         ui.label(egui::RichText::new(crate::i18n::tr_format!("… and {more} more", more = more)).color(t.text_dim));
                     }

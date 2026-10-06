@@ -214,6 +214,43 @@ pub fn load_vec(bytes: Vec<u8>, max_edge: usize) -> Result<(Rgb32f, SourceInfo),
 }
 
 fn load_bytes_now(bytes: std::borrow::Cow<'_, [u8]>, max_edge: usize) -> Result<(Rgb32f, SourceInfo), String> {
+    #[cfg(target_os = "macos")]
+    if lightcraft_raw::probe(&bytes) == Some(lightcraft_raw::RawFormat::Arw) {
+        match lightcraft_sysraw::decode(&bytes, max_edge) {
+            Ok(native) => {
+                if let Some(tone) = crate::camera_preview::native_tone(&native.linear_proxy, &native.display_proxy) {
+                    let metadata = lightcraft_raw::probe_info(&bytes).ok();
+                    let lens = metadata.as_ref().and_then(embedded_lens);
+                    let sensor_long_edge = metadata.as_ref().map(|r| r.crop.width.max(r.crop.height)).unwrap_or(0);
+                    let p = native.pixels;
+                    let img = Rgb32f { width: p.width, height: p.height, data: p.rgb };
+                    if lightcraft_pipeline::profiling() {
+                        eprintln!("[profile] ARW calibrated macOS linear source {}×{}, separate channel tone", img.width, img.height);
+                    }
+                    return Ok((
+                        img,
+                        SourceInfo {
+                            raw: true,
+                            relative_wb: true,
+                            camera_tone: Some(tone),
+                            camera_rgb_tone: true,
+                            sensor_long_edge,
+                            lens,
+                            ..Default::default()
+                        },
+                    ));
+                }
+                if lightcraft_pipeline::profiling() {
+                    eprintln!("[profile] macOS RAW starting tone rejected; using portable estimate");
+                }
+            }
+            Err(e) => {
+                if lightcraft_pipeline::profiling() {
+                    eprintln!("[profile] macOS RAW unavailable: {e}; using portable estimate");
+                }
+            }
+        }
+    }
     if lightcraft_raw::probe(&bytes).is_some() {
         let mut raw = match lightcraft_raw::decode(&bytes) {
             Ok(r) => r,
@@ -283,7 +320,15 @@ fn load_bytes_now(bytes: std::borrow::Cow<'_, [u8]>, max_edge: usize) -> Result<
         let (temp, tint) = if relative { (6500.0, 0.0) } else { (temp.round(), tint.round()) };
         return Ok((
             img,
-            SourceInfo { raw: true, as_shot_temp: temp, as_shot_tint: tint, lens, relative_wb: relative, camera_tone: camera_look.map(|p| p.tone) },
+            SourceInfo {
+                raw: true,
+                as_shot_temp: temp,
+                as_shot_tint: tint,
+                lens,
+                relative_wb: relative,
+                camera_tone: camera_look.map(|p| p.tone),
+                ..Default::default()
+            },
         ));
     }
     let d = lightcraft_codecs::decode(&bytes, lightcraft_codecs::DecodeOptions::fit(max_edge as u32, max_edge as u32)).map_err(|e| e.to_string())?;

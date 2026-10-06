@@ -21,6 +21,7 @@ pub mod render;
 pub mod shortcuts;
 pub mod softpaint;
 pub mod state;
+pub mod tasks;
 pub mod theme;
 pub mod widgets;
 
@@ -29,9 +30,15 @@ mod tests_curve;
 #[cfg(test)]
 mod tests_grid;
 #[cfg(test)]
+mod tests_library_problem;
+#[cfg(test)]
 mod tests_masking;
 #[cfg(test)]
+mod tests_offline;
+#[cfg(test)]
 mod tests_panels;
+#[cfg(test)]
+mod tests_quit_unsaved;
 #[cfg(test)]
 mod tests_scroll;
 #[cfg(test)]
@@ -60,6 +67,9 @@ pub type RevealFn = Box<dyn FnMut(&str) -> Result<(), String>>;
 pub type OpenUrlFn = Box<dyn FnMut(&str) -> Result<(), String>>;
 /// Open a file in an application (`app` = "" for the system's default one).
 pub type OpenWithFn = Box<dyn FnMut(&str, &str) -> Result<(), String>>;
+/// Something the host does with the session (web: back up or restore the library in browser
+/// storage); the work may finish asynchronously.
+pub type HostAction = Box<dyn FnMut(&mut Session) -> Result<Value, String>>;
 
 /// Platform services injected by the host app (desktop or web).
 #[derive(Default)]
@@ -89,6 +99,12 @@ pub struct Services {
     pub open_url: Option<OpenUrlFn>,
     /// Open a file in an external editor (Edit in External Editor; desktop only).
     pub open_with: Option<OpenWithFn>,
+    /// File ▸ Back Up Library…: save the whole library (catalog and originals) as one file the
+    /// user keeps (web only: there the library lives in browser storage, which the browser may
+    /// clear; on the desktop it is a folder backed up like any other).
+    pub backup_library: Option<HostAction>,
+    /// File ▸ Restore Library from Backup… (web only; keeps the current library).
+    pub restore_library: Option<HostAction>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -123,6 +139,12 @@ pub struct LightcraftApp {
     pub native_shortcuts: std::collections::HashSet<String>,
     /// The host is [`headless::Headless`] (it answers viewport screenshot commands itself).
     pub headless_host: bool,
+    /// Warnings to show one at a time (damaged settings files…, issue #103).
+    pub notices: Vec<String>,
+    /// Quitting was stopped because changes couldn't be saved: the prompt's text.
+    pub quit_prompt: Option<String>,
+    /// Quit Anyway was chosen: the window may close with unsaved changes.
+    pub quit_confirmed: bool,
     control_rx: Option<Receiver<ControlRequest>>,
     pending_screenshots: Vec<PendingShot>,
     screenshot_token: u64,
@@ -159,6 +181,8 @@ pub struct LightcraftApp {
     pub scan: Option<import::ScanTask>,
     /// A background export in progress.
     pub export: Option<export_task::ExportTask>,
+    /// Background file-system work of other commands (Find Missing Photos, auto import…).
+    pub tasks: tasks::Tasks,
     /// The files of the last finished background export (`ui.inspect` → `export.last`).
     pub last_export_result: Option<Value>,
     /// The look the loupe shows while the pointer rests on a preset or profile (set by the
@@ -170,6 +194,9 @@ pub struct LightcraftApp {
     gpu_applied: Option<bool>,
     /// The memory budget setting last applied (MB, 0 = automatic).
     memory_applied: Option<u32>,
+    /// The library failed to open at launch: the blocking window, then the temporary-session
+    /// banner (issue #100). Cleared once a library opens.
+    pub library_problem: Option<panels::library_problem::LibraryProblem>,
 }
 
 impl LightcraftApp {
@@ -187,6 +214,9 @@ impl LightcraftApp {
             native_menu: false,
             native_shortcuts: Default::default(),
             headless_host: false,
+            notices: vec![],
+            quit_prompt: None,
+            quit_confirmed: false,
             control_rx: None,
             pending_screenshots: vec![],
             screenshot_token: 0,
@@ -208,11 +238,13 @@ impl LightcraftApp {
             import: None,
             scan: None,
             export: None,
+            tasks: Default::default(),
             last_export_result: None,
             hover_preview: None,
             window_is_fullscreen: false,
             gpu_applied: None,
             memory_applied: None,
+            library_problem: None,
         }
     }
 
@@ -269,7 +301,12 @@ impl LightcraftApp {
             if self.ui.preview_build_seen != Some((key, true)) {
                 self.ui.preview_build_seen = Some((key, true));
                 let (done, failed) = (b.done.load(Ordering::Relaxed), b.failed.load(Ordering::Relaxed));
-                let mut msg = format!("Previews ready for {done} photo{}", if done == 1 { "" } else { "s" });
+                let plural = if done == 1 { "" } else { "s" };
+                let mut msg = match (b.error(), b.what) {
+                    (Some(e), what) => format!("{}: {e}", if what.is_empty() { "previews" } else { what }),
+                    (None, "") => format!("Previews ready for {done} photo{plural}"),
+                    (None, what) => format!("Done ({what}): {done} photo{plural}"),
+                };
                 if failed > 0 {
                     msg.push_str(&format!(" · {failed} couldn't be rendered"));
                 }
@@ -278,7 +315,11 @@ impl LightcraftApp {
         } else {
             if self.ui.preview_build_seen != Some((key, false)) {
                 self.ui.preview_build_seen = Some((key, false));
-                self.toast(ctx, format!("Building previews for {} photos…", b.total));
+                let msg = match b.what {
+                    "" => format!("Building previews for {} photos…", b.total),
+                    what => format!("Working on {what} for {} photos…", b.total),
+                };
+                self.toast(ctx, msg);
             }
             ctx.request_repaint_after(std::time::Duration::from_millis(250));
         }
@@ -306,7 +347,8 @@ impl LightcraftApp {
 
     pub fn toast(&mut self, ctx: &egui::Context, text: impl Into<String>) {
         let t = ctx.input(|i| i.time);
-        self.ui.toast = Some((text.into(), t + 1.4));
+        let text = text.into();
+        self.ui.toast = Some((crate::i18n::tr(&text).to_owned(), t + 1.4));
     }
 
     fn drain_control(&mut self, ctx: &egui::Context) {
@@ -441,6 +483,7 @@ impl LightcraftApp {
     pub fn logic(&mut self, ctx: &egui::Context) {
         i18n::set_language(self.ui.language);
         let t0 = now_ms();
+        panels::library_problem::logic(self);
         self.logic_inner(ctx);
         self.perf.logic_ms = now_ms() - t0;
     }
@@ -452,9 +495,18 @@ impl LightcraftApp {
             // File → Add from Device lists cards scanned in the background: show hot-plugs
             let repaint = ctx.clone();
             lightcraft_engine::devices::on_change(move || repaint.request_repaint());
+            // "is the original there?" (grid, Info panel, Missing Photos) answers from a cache a
+            // worker fills: a sleeping NAS or a dropped share never stalls a frame
+            let repaint = ctx.clone();
+            self.session.media.availability.run_in_background(std::sync::Arc::new(move || repaint.request_repaint()));
             self.styled = true;
         } else {
             self.fonts_ready = true;
+        }
+        panels::notices::logic(self);
+        // closing the window (or Quit) with changes only in memory: retry, else ask first
+        if ctx.input(|i| i.viewport().close_requested()) && !panels::notices::may_close(self) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
         let now = ctx.input(|i| i.time);
         let dt = now - self.last_time;
@@ -471,6 +523,7 @@ impl LightcraftApp {
         merge::poll(self, ctx);
         import::poll_scan(self, ctx);
         import::tick(self, ctx);
+        tasks::poll(self, ctx);
         self.preview_build_status(ctx);
         self.save_status(ctx);
         self.slideshow_tick(ctx);
@@ -485,17 +538,33 @@ impl LightcraftApp {
             }
         }
         self.ui.was_focused = focused;
-        // auto import: scan the watched folder every few seconds
+        // auto import: list the watched folder every few seconds (on a worker thread: it may be on
+        // a network share), then import what's new like any import (also on a worker thread)
         #[cfg(not(target_arch = "wasm32"))]
-        if self.session.import_defaults.auto_folder.is_some() {
+        if let Some(folder) = self.session.import_defaults.auto_folder.clone() {
+            const LABEL: &str = "Auto Import";
             let now = ctx.input(|i| i.time);
-            if now - self.ui.auto_import_at >= 3.0 {
+            if now - self.ui.auto_import_at >= 3.0 && self.import.is_none() && !self.tasks.is_running(LABEL) {
                 self.ui.auto_import_at = now;
-                if let Ok(r) = self.session.execute("library.autoImportScan", &serde_json::json!({})) {
-                    let n = r["imported"].as_array().map_or(0, Vec::len);
-                    if n > 0 {
-                        self.toast(ctx, format!("Auto Import: added {n} photo{}", if n == 1 { "" } else { "s" }));
+                let work = move || lightcraft_engine::cmd::library::list_auto_import_folder(&folder);
+                let done = |app: &mut LightcraftApp, _ctx: &egui::Context, listing: Result<Vec<(String, u64)>, String>| {
+                    let listing = match listing {
+                        Ok(l) => l,
+                        Err(e) => return log::debug!("auto import: {e}"),
+                    };
+                    let p = serde_json::json!({"listing": listing, "start": false});
+                    let Ok(r) = app.session.execute("library.autoImportScan", &p) else { return };
+                    let Some(mut params) = r.get("import").cloned().filter(|_| app.import.is_none()) else { return };
+                    let paths: Vec<String> =
+                        params["paths"].as_array().into_iter().flatten().filter_map(|v| v.as_str().map(str::to_string)).collect();
+                    if let Some(o) = params.as_object_mut() {
+                        o.remove("paths");
                     }
+                    let undo0 = app.session.undo.len();
+                    app.import = Some(import::ImportTask::new(paths, params, undo0, false).auto());
+                };
+                if let Err(e) = tasks::spawn(self, LABEL, work, done) {
+                    log::warn!("{e}");
                 }
             }
             ctx.request_repaint_after(std::time::Duration::from_secs(3));
@@ -515,8 +584,11 @@ impl LightcraftApp {
             if !presets.is_empty() {
                 let _ = self.run("file.importPresets", serde_json::json!({"paths": presets}));
             }
-            if !photos.is_empty() {
-                let _ = self.run("library.import", serde_json::json!({"paths": photos}));
+            // read and added on a worker thread (dropped folders can be large, or on a slow drive)
+            if !photos.is_empty()
+                && let Err(e) = import::start_paths(self, photos)
+            {
+                self.toast(ctx, e);
             }
         }
     }
@@ -603,7 +675,9 @@ impl LightcraftApp {
             // full-screen preview: the photo alone on black
             egui::CentralPanel::default().frame(egui::Frame::NONE.fill(egui::Color32::BLACK)).show(ui, |ui| panels::detail::show(self, ui));
             panels::second::show(self, &ctx);
+            panels::notices::show(self, &ctx);
             panels::dialogs::show(self, &ctx);
+            panels::library_problem::show(self, &ctx);
             panels::toast(self, &ctx);
             self.widgets = widgets::take_registry(&ctx);
             self.end_frame(t0);
@@ -612,6 +686,7 @@ impl LightcraftApp {
         // Order matters: earlier panels take the full edge (top bar spans the window; the tool strip,
         // right panels and left panel run to the bottom; the bottom bar sits between them).
         panels::topbar::show(self, ui);
+        panels::library_problem::banner(self, ui);
         panels::strip::show(self, ui);
         if self.ui.right != state::RightPanel::None {
             panels::right::show(self, ui);
@@ -638,7 +713,9 @@ impl LightcraftApp {
             state::ViewMode::Reference => panels::compare::show_reference(self, ui),
         });
         panels::second::show(self, &ctx);
+        panels::notices::show(self, &ctx);
         panels::dialogs::show(self, &ctx);
+        panels::library_problem::show(self, &ctx);
         import::progress(self, &ctx);
         import::scan_progress(self, &ctx);
         export_task::poll(self, &ctx);

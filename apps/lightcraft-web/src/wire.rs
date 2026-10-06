@@ -161,7 +161,7 @@ impl WorkerCore {
                 let src = match (&job.origin, original) {
                     (Source::File { .. }, Some(bytes)) => {
                         let (image, info) = lightcraft_engine::files::load_bytes(bytes, job.max_edge)?;
-                        DecodedSource { image: Arc::new(image), info: Some(info) }
+                        DecodedSource::new(Arc::new(image), Some(info))
                     }
                     (Source::File { path }, None) => return Err(format!("{path}: original not found in browser storage")),
                     (origin @ Source::Demo { .. }, _) => self.media.origin_ref(origin, job.max_edge).load_source()?,
@@ -171,7 +171,7 @@ impl WorkerCore {
                 src
             }
         };
-        let info = src.info.unwrap_or(job.info());
+        let info = src.info_or(job.info());
         Ok(match &job.stages {
             Some(view) => {
                 let st = self.stages.entry(view.clone()).or_default().clone();

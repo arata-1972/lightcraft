@@ -17,6 +17,8 @@ struct Flaky {
     fail: Arc<AtomicBool>,
     /// Only snapshots fail (appends work).
     snapshots_only: bool,
+    /// Only appends fail (a dead log handle; fresh files can still be written).
+    appends_only: bool,
 }
 
 impl Flaky {
@@ -39,7 +41,7 @@ impl Store for Flaky {
         self.files.read(name)
     }
     fn write_atomic(&mut self, name: &str, data: &[u8]) -> std::io::Result<()> {
-        if self.failing() {
+        if self.failing() && !self.appends_only {
             return Err(std::io::Error::other("disk full"));
         }
         self.files.write_atomic(name, data)
@@ -144,4 +146,48 @@ fn failed_snapshot_does_not_fail_the_command() {
     drop(s);
     store.set_failing(false);
     assert_eq!(open(&store, false).catalog.albums().count(), 2);
+}
+
+/// Issue #101: quitting while the log can't be appended to still saves the queued changes in the
+/// closing snapshot (a fresh file), and reports success; they are not appended again later.
+#[test]
+fn close_saves_queued_changes_in_the_snapshot_when_appends_fail() {
+    let store = Flaky { appends_only: true, ..Default::default() };
+    let mut s = open(&store, true);
+    let id = s.selection.active.unwrap();
+    store.set_failing(true);
+    assert!(matches!(s.execute("photo.rate", &json!({"rating": 4})), Err(EngineError::NotSaved(_))));
+    assert!(matches!(s.execute("photo.flag", &json!({"flag": "pick"})), Err(EngineError::NotSaved(_))));
+    assert_eq!(s.unsaved().map(|u| u.0), Some(2));
+    s.close_library().unwrap();
+    assert_eq!(s.unsaved(), None);
+    assert!(s.pending_log.is_empty());
+    let expect = s.catalog.to_snapshot();
+    drop(s);
+    store.set_failing(false);
+    let mut s2 = open(&store, true);
+    assert_eq!(s2.catalog.to_snapshot(), expect);
+    let p = s2.catalog.photo(id).unwrap();
+    assert_eq!((p.rating, p.flag), (4, Flag::Pick));
+    // later edits continue after the absorbed ops
+    s2.execute("photo.rate", &json!({"rating": 2})).unwrap();
+    let expect = s2.catalog.to_snapshot();
+    drop(s2);
+    assert_eq!(open(&store, true).catalog.to_snapshot(), expect);
+}
+
+/// When neither the log nor the snapshot can be written, closing fails with `NotSaved` and the
+/// changes stay queued (a later retry can still save them).
+#[test]
+fn close_fails_when_nothing_can_be_saved() {
+    let store = Flaky::default();
+    let mut s = open(&store, true);
+    store.set_failing(true);
+    assert!(s.execute("photo.rate", &json!({"rating": 4})).is_err());
+    let e = s.close_library().unwrap_err();
+    assert!(matches!(e, EngineError::NotSaved(_)), "{e:?}");
+    assert_eq!(s.unsaved().map(|u| u.0), Some(1));
+    store.set_failing(false);
+    s.close_library().unwrap();
+    assert_eq!(s.unsaved(), None);
 }

@@ -166,7 +166,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Rename Folder",
             [],
             None,
-            "{path, name} — rename a folder on disk (its files and sidecars go along) and relink the photos in it; not an undo step → {path, relinked}",
+            "{path, name} — rename a folder on disk (its files and sidecars go along) and relink the photos in it; one undo step (undo renames it back, refused if the old name is taken) → {path, relinked}",
             always,
             |s, p| {
                 let from = str_param(p, "path").ok_or_else(|| bad("folder.rename", "missing path"))?.trim_end_matches(['/', '\\']).to_string();
@@ -184,7 +184,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Move Folder",
             [],
             None,
-            "{path, into: destination folder} — move a folder on disk into another and relink the photos in it; not an undo step → {path, relinked}",
+            "{path, into: destination folder} — move a folder on disk into another and relink the photos in it; one undo step (undo moves it back, refused if the old place is taken) → {path, relinked}",
             always,
             |s, p| {
                 let from = str_param(p, "path").ok_or_else(|| bad("folder.move", "missing path"))?.trim_end_matches(['/', '\\']).to_string();
@@ -217,58 +217,85 @@ pub fn specs() -> Vec<CommandSpec> {
     ]
 }
 
-/// Rename or move a folder on disk (everything in it goes along, sidecars included) and relink
-/// the photos inside. Like a rename in the file manager it is not an undo step: undoing would
-/// point the photos back at a folder that no longer exists.
-pub(crate) fn move_folder(s: &mut crate::Session, from: &str, to: &str) -> std::result::Result<usize, String> {
-    use std::path::Path;
+/// Rename `from` to `to` on disk (a folder; everything in it goes along). Never overwrites:
+/// refused when `to` exists (a case-only rename on a case-insensitive file system goes through
+/// a temporary name). Missing parents of `to` are created.
+pub(crate) fn rename_folder_on_disk(from: &str, to: &str) -> std::result::Result<(), String> {
     let (src, dst) = (Path::new(from), Path::new(to));
     if !src.is_dir() {
-        return Err(format!("{from} is not a folder"));
+        return Err(format!("{from} is not a folder (moved or deleted?)"));
     }
-    if dst.exists() {
+    let case_only = from != to && from.to_lowercase() == to.to_lowercase();
+    if dst.exists() && !case_only {
         return Err(format!("{to} already exists"));
     }
     if dst.starts_with(src) {
         return Err("a folder can't move into itself".into());
     }
-    if s.library.as_ref().is_some_and(|l| l.dir.starts_with(src) || src.starts_with(&l.dir)) {
-        return Err("the library's own folders can't be moved here".into());
-    }
     if let Some(parent) = dst.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
     }
-    std::fs::rename(src, dst).map_err(|e| format!("{from} → {to}: {e}"))?;
-    let mut n = 0;
-    let ops: Vec<lightcraft_catalog::Op> = s
+    if case_only {
+        let tmp = src.with_file_name(format!(".lc-rename-{}", std::process::id()));
+        if tmp.exists() {
+            return Err(format!("{} already exists", tmp.display()));
+        }
+        std::fs::rename(src, &tmp).map_err(|e| format!("{from} → {to}: {e}"))?;
+        return std::fs::rename(&tmp, dst).map_err(|e| {
+            let _ = std::fs::rename(&tmp, src);
+            format!("{from} → {to}: {e}")
+        });
+    }
+    std::fs::rename(src, dst).map_err(|e| format!("{from} → {to}: {e}"))
+}
+
+/// After a folder moved from `from` to `to`: a browsed folder at or below it follows.
+pub(crate) fn follow_folder(s: &mut Session, from: &str, to: &str) {
+    if let Some(b) = &mut s.browse
+        && let Ok(rel) = Path::new(&b.path).strip_prefix(from)
+    {
+        b.path = Path::new(to).join(rel).to_string_lossy().to_string();
+        let f = b.path.clone();
+        s.filter.folder = Some(f);
+    }
+}
+
+/// Rename or move a folder on disk (everything in it goes along, sidecars included) and relink
+/// the photos inside, as one undo step: undo renames the folder back and restores the photos'
+/// paths, redo repeats the move — each refused (and reported) when the destination is taken.
+pub(crate) fn move_folder(s: &mut Session, from: &str, to: &str) -> std::result::Result<usize, String> {
+    let (src, dst) = (Path::new(from), Path::new(to));
+    if !src.is_dir() {
+        return Err(format!("{from} is not a folder"));
+    }
+    if s.library.as_ref().is_some_and(|l| l.dir.starts_with(src) || src.starts_with(&l.dir)) {
+        return Err("the library's own folders can't be moved here".into());
+    }
+    rename_folder_on_disk(from, to)?;
+    let ops: Vec<Op> = s
         .catalog
         .photos()
         .filter_map(|p| match &p.source {
             lightcraft_catalog::Source::File { path } => Path::new(path).strip_prefix(src).ok().map(|rel| (p.id, p.file_name.clone(), dst.join(rel))),
             _ => None,
         })
-        .map(|(id, file_name, np)| {
-            n += 1;
-            lightcraft_catalog::Op::Relink {
-                id,
-                file_name,
-                source: lightcraft_catalog::Source::File { path: np.to_string_lossy().to_string() },
-                format: None,
-            }
+        .map(|(id, file_name, np)| Op::Relink {
+            id,
+            file_name,
+            source: lightcraft_catalog::Source::File { path: np.to_string_lossy().to_string() },
+            format: None,
         })
         .collect();
-    for op in ops {
-        if s.catalog.apply(op.clone()).is_ok() {
-            s.pending_log.push(op);
-        }
+    let n = ops.len();
+    let name = Path::new(to).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let renamed = src.parent() == dst.parent();
+    let label = if renamed { format!("Rename Folder to “{name}”") } else { format!("Move Folder “{name}”") };
+    let folder = crate::FolderMove { from: to.to_string(), to: from.to_string() };
+    if let Err(e) = s.commit_with_folder(&label, Op::Batch { ops }, folder) {
+        // the catalog didn't take it: put the folder back where the photos still point
+        let back = rename_folder_on_disk(to, from).err().map(|b| format!("; moving it back failed too: {b}")).unwrap_or_default();
+        return Err(format!("{e}{back}"));
     }
-    // a browsed folder at or below it follows
-    if let Some(b) = &mut s.browse
-        && let Ok(rel) = Path::new(&b.path).strip_prefix(src)
-    {
-        b.path = dst.join(rel).to_string_lossy().to_string();
-        let f = b.path.clone();
-        s.filter.folder = Some(f);
-    }
+    follow_folder(s, from, to);
     Ok(n)
 }

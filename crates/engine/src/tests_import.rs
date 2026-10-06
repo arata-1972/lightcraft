@@ -144,6 +144,99 @@ fn browsing_a_folder_lists_its_photos_without_adding_them() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Photos a.png, b.png, c.png imported from `old`, then: a renamed into `moved`; b renamed, with
+/// an impostor (same name and size, other bytes) under its old name; c gone, with two impostors.
+fn renamed_and_ambiguous_scene(tag: &str) -> (std::path::PathBuf, Session) {
+    let dir = temp_dir(tag);
+    std::fs::create_dir_all(dir.join("old")).unwrap();
+    std::fs::create_dir_all(dir.join("moved/real")).unwrap();
+    for (n, seed) in [("a.png", 1), ("b.png", 2), ("c.png", 3)] {
+        write_png(&dir.join("old").join(n), seed);
+    }
+    let mut s = Session::new().with_fs();
+    s.execute("library.import", &json!({"paths": [dir.join("old").to_string_lossy()]})).unwrap();
+    let impostor = |src: &Path, dst: &Path| {
+        let mut b = std::fs::read(src).unwrap();
+        let k = b.len() - 20;
+        b[k] ^= 0xff;
+        std::fs::write(dst, b).unwrap();
+    };
+    std::fs::rename(dir.join("old/a.png"), dir.join("moved/Trip-001.png")).unwrap();
+    impostor(&dir.join("old/b.png"), &dir.join("moved/b.png"));
+    std::fs::rename(dir.join("old/b.png"), dir.join("moved/real/Trip-002.png")).unwrap();
+    impostor(&dir.join("old/c.png"), &dir.join("moved/c.png"));
+    impostor(&dir.join("old/c.png"), &dir.join("moved/real/c.png"));
+    std::fs::remove_file(dir.join("old/c.png")).unwrap();
+    (dir, s)
+}
+
+/// Issue #105: Find Missing finds renamed files by content, prefers the content match over a
+/// same-name same-size impostor, and skips (reports) photos it can't tell apart.
+#[test]
+fn find_missing_matches_renamed_files_by_content() {
+    let (dir, mut s) = renamed_and_ambiguous_scene("missing-content");
+    let r = s.execute("library.findMissing", &json!({"folder": dir.join("moved").to_string_lossy()})).unwrap();
+    let found = r["found"].as_array().unwrap();
+    assert_eq!(found.len(), 2, "{r}");
+    let to = |name: &str| {
+        found.iter().find(|f| f["from"].as_str().unwrap().ends_with(name)).map(|f| (f["to"].as_str().unwrap().to_string(), f["by"].clone()))
+    };
+    assert_eq!(to("a.png"), Some((dir.join("moved/Trip-001.png").to_string_lossy().to_string(), json!("content"))));
+    assert_eq!(to("b.png"), Some((dir.join("moved/real/Trip-002.png").to_string_lossy().to_string(), json!("content"))), "not the impostor");
+    assert_eq!(r["missing"], 1);
+    assert_eq!(r["ambiguous"][0]["candidates"].as_array().map(Vec::len), Some(2), "{r}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Issue #104: the app plans Find Missing on a worker thread (no session) and relinks the plan
+/// afterwards; that gives exactly what the synchronous command gives — renamed files by content,
+/// impostors and look-alikes skipped (`ambiguous`).
+#[test]
+fn find_missing_planned_on_a_worker_matches_the_command() {
+    use crate::cmd::missing::{find_candidates, plan_find_missing};
+    let (dir, mut s) = renamed_and_ambiguous_scene("missing-worker");
+    let folder = dir.join("moved").to_string_lossy().to_string();
+    let candidates = find_candidates(&s.catalog);
+    let f = folder.clone();
+    let plan = std::thread::spawn(move || plan_find_missing(&candidates, &f)).join().unwrap().unwrap();
+    assert_eq!((plan.found.len(), plan.missing, plan.ambiguous.len()), (2, 1, 1), "{plan:?}");
+    let applied = s.execute("library.findMissing", &plan.to_json()).unwrap();
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(s.execute("library.missing", &json!({})).unwrap().as_array().map(Vec::len), Some(3), "undo restores all three");
+    let direct = s.execute("library.findMissing", &json!({"folder": folder})).unwrap();
+    assert_eq!(applied, direct);
+    assert_eq!(direct["found"].as_array().map(Vec::len), Some(2), "{direct}");
+    assert_eq!(direct["ambiguous"].as_array().map(Vec::len), Some(1), "{direct}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Issue #104: a plan made on a worker is re-checked when it is applied: a photo relinked
+/// meanwhile is left alone, and a file that is now another photo's original isn't used.
+#[test]
+fn find_missing_plan_is_rechecked_when_applied() {
+    use crate::cmd::missing::{find_candidates, plan_find_missing};
+    let (dir, mut s) = renamed_and_ambiguous_scene("missing-recheck");
+    let plan = plan_find_missing(&find_candidates(&s.catalog), &dir.join("moved").to_string_lossy()).unwrap();
+    let to = |name: &str| plan.found.iter().find(|f| f.from.ends_with(name)).unwrap().clone();
+    let (a, b) = (to("a.png"), to("b.png"));
+    // meanwhile: a is relinked by hand (elsewhere), and the ambiguous c is pointed at b's file
+    std::fs::copy(&a.to, dir.join("a-elsewhere.png")).unwrap();
+    s.execute("photo.relink", &json!({"id": a.id.0, "path": dir.join("a-elsewhere.png").to_string_lossy()})).unwrap();
+    let c = plan.ambiguous[0].id;
+    s.execute("photo.relink", &json!({"id": c.0, "path": b.to})).unwrap();
+    let r = s.execute("library.findMissing", &plan.to_json()).unwrap();
+    assert_eq!(r["found"].as_array().map(Vec::len), Some(0), "{r}");
+    assert_eq!(r["ambiguous"].as_array().map(Vec::len), Some(0), "c isn't missing any more: {r}");
+    assert_eq!(r["missing"], 1, "b stays missing: its file is c's now: {r}");
+    let path_of = |id: lightcraft_catalog::PhotoId| match &s.catalog.photo(id).unwrap().source {
+        lightcraft_catalog::Source::File { path } => path.clone(),
+        _ => String::new(),
+    };
+    assert_eq!(path_of(a.id), dir.join("a-elsewhere.png").to_string_lossy());
+    assert_eq!(path_of(b.id), b.from);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn missing_files_are_found_and_relinked() {
     let dir = std::env::temp_dir().join(format!("lc-missing-{}", std::process::id()));
@@ -352,6 +445,58 @@ fn smart_previews_stand_in_for_offline_originals() {
     let _ = std::fs::remove_dir_all(&lib);
 }
 
+/// Issue #106: a smart preview cut short (crash, full drive) counted as built forever and failed
+/// exactly when the original went offline. Writes are atomic now, and a damaged proxy is not
+/// reported as present and is rebuilt.
+#[test]
+fn damaged_smart_previews_are_rebuilt_and_failed_writes_leave_none() {
+    let src = temp_dir("smartdmg-src");
+    let lib = temp_dir("smartdmg-lib");
+    write_png(&src.join("a.png"), 5);
+    let mut s = Session::new().with_fs();
+    s.open_library(&lib, false).unwrap();
+    s.execute("library.import", &json!({"paths": [src.join("a.png").to_string_lossy()]})).unwrap();
+    let id = s.active().unwrap();
+    let dir = s.media.smart_dir.clone().unwrap();
+    let file = dir.join(crate::smart::file_name(s.catalog.photo(id).unwrap()));
+    {
+        let _fault = lightcraft_catalog::safe_file::fail_writes_after(64);
+        let r = s.execute("library.smartPreviews", &json!({})).unwrap();
+        assert_eq!((r["built"].as_u64(), r["failed"].as_array().map(Vec::len)), (Some(0), Some(1)), "{r}");
+    }
+    assert!(!file.exists(), "no partial proxy");
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0, "no temp file left");
+    assert_eq!(s.execute("photo.smartPreview", &json!({})).unwrap()["smartPreview"], false);
+
+    let r = s.execute("library.smartPreviews", &json!({})).unwrap();
+    assert_eq!((r["built"].as_u64(), r["repaired"].as_u64()), (Some(1), Some(0)), "{r}");
+    assert!(crate::smart::is_valid(&file));
+    // cut short, as by a crash before the fix
+    let full = std::fs::read(&file).unwrap();
+    std::fs::write(&file, &full[..full.len() / 2]).unwrap();
+    assert!(!crate::smart::is_valid(&file));
+    assert_eq!(s.execute("photo.smartPreview", &json!({})).unwrap()["smartPreview"], false, "not counted as there");
+    let r = s.execute("library.smartPreviews", &json!({})).unwrap();
+    assert_eq!((r["built"].as_u64(), r["repaired"].as_u64()), (Some(1), Some(1)), "{r}");
+    assert_eq!(std::fs::read(&file).unwrap(), full, "rebuilt whole");
+    // the app's background build (issue #104) checks and repairs the same way, on a worker thread
+    std::fs::write(&file, &full[..full.len() / 2]).unwrap();
+    let r = s.execute("library.smartPreviews", &json!({"background": true})).unwrap();
+    assert_eq!(r["what"], "smart previews", "{r}");
+    let t0 = std::time::Instant::now();
+    let r = loop {
+        let r = s.execute("library.previewProgress", &json!({})).unwrap();
+        if r["running"] == false || t0.elapsed() > std::time::Duration::from_secs(60) {
+            break r;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    };
+    assert_eq!((r["done"].as_u64(), r["failed"].as_u64(), r["repaired"].as_u64()), (Some(1), Some(0), Some(1)), "{r}");
+    assert_eq!(std::fs::read(&file).unwrap(), full, "rebuilt whole in the background");
+    let _ = std::fs::remove_dir_all(&src);
+    let _ = std::fs::remove_dir_all(&lib);
+}
+
 /// LUT profiles: a .cube imports as a creative profile (into the library), renders differently
 /// (Amount 0 = no change), is listed in the profile browser and comes back with the library.
 #[test]
@@ -438,6 +583,70 @@ fn folders_rename_and_move_with_their_photos() {
     let r = s.execute("folder.move", &json!({"path": b.to_string_lossy(), "into": root.join("Archive").to_string_lossy()})).unwrap();
     assert_eq!(r["relinked"], 1);
     assert_eq!(path(&s), root.join("Archive/Italy 2026/one.png").to_string_lossy());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Rename / Move Folder are undo steps (issue #97): undo renames the folder back on disk (files and
+/// sidecars along) and restores the photos' paths, redo repeats it; a destination taken in the
+/// meantime is never overwritten — the step is refused, reported and stays on the stack.
+#[test]
+fn folder_rename_and_move_undo_and_redo_on_disk() {
+    let root = temp_dir("folders-undo");
+    let a = root.join("Trip");
+    write_png(&a.join("one.png"), 3);
+    std::fs::write(a.join("one.xmp"), "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"/>").unwrap();
+    let mut s = Session::new().with_fs();
+    s.execute("library.import", &json!({"paths": [a.to_string_lossy()]})).unwrap();
+    let id = s.active().unwrap();
+    let path = |s: &Session| match &s.catalog.photo(id).unwrap().source {
+        lightcraft_catalog::Source::File { path } => path.clone(),
+        _ => panic!(),
+    };
+    let undo0 = s.undo.len();
+    let b = root.join("Italy");
+    s.execute("folder.rename", &json!({"path": a.to_string_lossy(), "name": "Italy"})).unwrap();
+    assert_eq!(s.undo.len(), undo0 + 1, "one undo step");
+    assert!(s.undo.last().unwrap().label.contains("Rename Folder"));
+    assert!(b.join("one.png").exists() && !a.exists());
+
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert!(a.join("one.png").exists() && a.join("one.xmp").exists() && !b.exists(), "renamed back on disk");
+    assert_eq!(path(&s), a.join("one.png").to_string_lossy());
+    s.media.forget(id);
+    assert!(s.render_now(id, 16, 16).is_ok());
+
+    s.execute("edit.redo", &json!({})).unwrap();
+    assert!(b.join("one.png").exists() && b.join("one.xmp").exists() && !a.exists());
+    assert_eq!(path(&s), b.join("one.png").to_string_lossy());
+
+    // the old name is taken now: undo is refused, nothing is overwritten, the step stays
+    std::fs::create_dir_all(&a).unwrap();
+    std::fs::write(a.join("keep.txt"), "mine").unwrap();
+    let undo_n = s.undo.len();
+    let e = s.execute("edit.undo", &json!({})).unwrap_err().to_string();
+    assert!(e.contains("already exists"), "{e}");
+    assert_eq!(s.undo.len(), undo_n, "the step stays on the stack");
+    assert_eq!(std::fs::read_to_string(a.join("keep.txt")).unwrap(), "mine");
+    assert!(b.join("one.png").exists());
+    assert_eq!(path(&s), b.join("one.png").to_string_lossy());
+    std::fs::remove_dir_all(&a).unwrap();
+
+    // move into another folder, undo, redo
+    let into = root.join("Archive");
+    s.execute("folder.move", &json!({"path": b.to_string_lossy(), "into": into.to_string_lossy()})).unwrap();
+    let moved = into.join("Italy");
+    assert_eq!(path(&s), moved.join("one.png").to_string_lossy());
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert!(b.join("one.png").exists() && !moved.exists());
+    assert_eq!(path(&s), b.join("one.png").to_string_lossy());
+    // the redo target is taken (even by an empty folder): refused, nothing replaced
+    std::fs::create_dir_all(&moved).unwrap();
+    assert!(s.execute("edit.redo", &json!({})).is_err());
+    assert!(b.join("one.png").exists());
+    std::fs::remove_dir(&moved).unwrap();
+    s.execute("edit.redo", &json!({})).unwrap();
+    assert!(moved.join("one.png").exists() && moved.join("one.xmp").exists() && !b.exists());
+    assert_eq!(path(&s), moved.join("one.png").to_string_lossy());
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -590,6 +799,7 @@ fn smart_previews_folder_is_chosen_per_library() {
     assert_eq!(s.execute("photo.smartPreview", &json!({})).unwrap()["smartPreview"], true);
 
     // the setting is saved with the library
+    drop(s); // one session per library (issue #99)
     let mut again = Session::new().with_fs();
     again.open_library(&lib, false).unwrap();
     assert_eq!(again.execute("library.smartPreviewsLocation", &json!({})).unwrap()["path"], to.to_string_lossy().as_ref());

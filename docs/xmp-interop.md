@@ -8,8 +8,8 @@ other tools), and let LightCraft pick up edits made elsewhere.
 
 | | |
 |---|---|
-| Name | `<stem>.xmp` by default (`IMG_0001.CR3` → `IMG_0001.xmp`); `<file>.xmp` (`IMG_0001.CR3.xmp`) with `naming: "full"`. Reading accepts either (preferred first) and `.XMP`. |
-| Write | `photo.saveMetadataToFile {ids?}` (Photo ▸ Save Metadata to File, ⌘S), or automatically after every change with `library.xmpPreferences {autoWrite: true}` (File ▸ Automatically Write Changes into XMP). Slider drags are written once, when the drag ends; undo/redo rewrite the sidecar. Written atomically (temp file + rename). |
+| Name | `<stem>.xmp` by default (`IMG_0001.CR3` → `IMG_0001.xmp`); `<file>.xmp` (`IMG_0001.CR3.xmp`) with `naming: "full"`. Reading accepts either (preferred first) and `.XMP`. With stem naming, files sharing a stem don't share a sidecar: see *Shared names* below. |
+| Write | `photo.saveMetadataToFile {ids?}` (Photo ▸ Save Metadata to File, ⌘S), or automatically after every change with `library.xmpPreferences {autoWrite: true}` (File ▸ Automatically Write Changes into XMP). Slider drags are written once, when the drag ends; undo/redo rewrite the sidecar. An existing sidecar is **merged into, never replaced** (see *Saving into an existing sidecar*). Written atomically (temp file, fsync, rename). The result lists `written`, `merged` and `backups`. |
 | Read | On import (`library.import`, the report counts `sidecars`), and `photo.readMetadataFromFile {ids?}` (one undo step). For raw/DNG files without a sidecar, the XMP embedded in the file is used. |
 | Preferences | `library.xmpPreferences {autoWrite?, naming?: stem\|full}`, stored in the library's `prefs.json`. |
 
@@ -36,6 +36,39 @@ has none, the sidecar's `exif:DateTimeOriginal`, else `photoshop:DateCreated`, e
 used — on import (it then also files a copied photo in its date folder) and by `photo.readMetadataFromFile` (undoable).
 `xmp:Rating="-1"` (the XMP convention for rejected) sets the reject flag. Develop settings come from
 `lc:settings` when present (exact); otherwise from the `crs:` fields below (approximate).
+
+## Saving into an existing sidecar
+
+A sidecar may already hold another application's data — e.g. its `crs:` develop settings and `xmpMM:History` — often
+the only copy of those edits outside that application's catalog. Saving never drops it:
+
+- LightCraft **owns** the properties in the table above: `xmp:Rating`, `xmp:Label`, `dc:title`, `dc:description`,
+  `dc:rights`, `dc:creator`, `dc:subject`, `Iptc4xmpCore:Location`, `Iptc4xmpCore:AltTextAccessibility`,
+  `Iptc4xmpCore:ExtDescrAccessibility`, `photoshop:City`/`State`/`Country`, `xmpRights:Marked`/`UsageTerms`/
+  `WebStatement` and everything in `lc:`. They are replaced on every save, and removed when LightCraft has no value
+  (clearing a title in LightCraft clears it in the file). All of them are read back on import, so the library starts
+  from what the sidecar said.
+- The **capture time** (`exif:DateTimeOriginal`, `photoshop:DateCreated`) and **GPS** (`exif:GPSLatitude`,
+  `exif:GPSLongitude`) are replaced only when LightCraft has a value; otherwise the file's stay.
+- **Everything else is kept byte for byte**: other namespaces (`crs:`, `xmpMM:`, `lr:hierarchicalSubject`, unknown
+  ones), `xmp:CreatorTool`, comments, the packet wrapper and padding. LightCraft's properties go into one
+  `rdf:Description` of their own; owned properties written by another application (in attribute or element form) are
+  removed from its description, which otherwise stays as it was.
+- A sidecar that can't be read as XMP (not well-formed, not UTF-8, no `rdf:RDF`) is first copied to
+  `<name>.xmp.bak-<date><time>` (`-1`, `-2`… if taken — a backup is never overwritten), then replaced. A sidecar that
+  can't be read at all (permissions) is left alone and the save fails.
+
+Limits: LightCraft writes keywords to `dc:subject` only, so another application's `lr:hierarchicalSubject` is kept as
+it was and may still list keywords removed in LightCraft. LightCraft doesn't write `crs:`: the other application's
+develop settings stay as that application left them, next to LightCraft's own (`lc:settings`, which LightCraft reads
+first).
+
+## Shared names
+
+With stem naming, `IMG_0001.CR3` and `IMG_0001.JPG` map to the same `IMG_0001.xmp`. When two or more files in the
+library share a stem, the stem sidecar belongs to one of them — a raw first, otherwise the first by file name — and
+the others write and read `<file>.xmp` (`IMG_0001.JPG.xmp`), falling back to the stem sidecar for reading when they
+have none. So saving one photo never overwrites the other's metadata (`Session::sidecar_naming`).
 
 ## Reading `crs:` develop fields
 

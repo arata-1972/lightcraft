@@ -553,9 +553,16 @@ fn info(app: &mut LightcraftApp, ui: &mut egui::Ui, id: PhotoId) {
             ui.label(egui::RichText::new(line).color(t.text_dim));
         }
         // offline originals / smart previews
+        // (cached answers, checked off the UI thread: unknown counts as online / no smart preview)
         if let lightcraft_catalog::Source::File { path } = &p.source {
-            let online = std::path::Path::new(path).exists();
-            let smart = lightcraft_engine::cmd::previews::has_smart_preview(&app.session, p.id);
+            let avail = &app.session.media.availability;
+            let online = !avail.is_offline(path);
+            let smart = app
+                .session
+                .media
+                .smart_dir
+                .as_ref()
+                .is_some_and(|d| avail.exists(&d.join(lightcraft_engine::smart::file_name(&p)).to_string_lossy()) == Some(true));
             if !online || smart {
                 let text = match (online, smart) {
                     (false, true) => "Original offline · editing the smart preview",

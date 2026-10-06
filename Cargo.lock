@@ -2182,6 +2182,7 @@ dependencies = [
  "lightcraft-raster",
  "lightcraft-raw",
  "lightcraft-scenes",
+ "lightcraft-sysraw",
  "log",
  "miniz_oxide 0.8.9",
  "rayon",
@@ -2329,6 +2330,15 @@ name = "lightcraft-sysmem"
 version = "0.2.0"
 
 [[package]]
+name = "lightcraft-sysraw"
+version = "0.2.0"
+dependencies = [
+ "objc2 0.5.2",
+ "objc2-core-image",
+ "objc2-foundation 0.2.2",
+]
+
+[[package]]
 name = "lightcraft-tiff"
 version = "0.2.0"
 dependencies = [
@@ -2361,6 +2371,7 @@ dependencies = [
 name = "lightcraft-web"
 version = "0.2.0"
 dependencies = [
+ "crc32fast",
  "eframe",
  "egui",
  "js-sys",

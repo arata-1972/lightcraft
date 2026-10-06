@@ -359,6 +359,9 @@ pub struct UiState {
     /// Transient toast text and its expiry (seconds of app time).
     #[serde(skip)]
     pub toast: Option<(String, f64)>,
+    /// The result of the last Find Missing Photos (it searches in the background).
+    #[serde(skip)]
+    pub last_find_missing: Option<serde_json::Value>,
     #[serde(skip)]
     pub status: String,
     #[serde(skip)]
@@ -589,6 +592,7 @@ impl Default for UiState {
             compare: None,
             reference: None,
             toast: None,
+            last_find_missing: None,
             status: String::new(),
             dialog: None,
         }

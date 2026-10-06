@@ -154,3 +154,41 @@ fn pool_runs_inline() {
     assert_eq!(p.run_inline(10), 1);
     assert_eq!(p.try_recv().map(|d| d.result), Some(1));
 }
+
+#[test]
+fn disk_cache_never_touches_foreign_files() {
+    // issue #98: a library opened on a folder that already has a `thumbs/` folder
+    let dir = temp_dir("foreign");
+    let foreign = [
+        dir.join("readme.txt"),
+        dir.join("ab").join("holiday.jpg"),
+        dir.join("ab").join("0123456789abcdef0123456789abcdef.jpg"), // wrong shard
+        dir.join("small").join("0123456789abcdef0123456789abcdef.jpg"),
+        dir.join("01").join("0123456789ABCDEF0123456789ABCDEF.jpg"), // upper case
+        dir.join("01").join("0123456789abcdef0123456789abcdef.jpeg"),
+        dir.join("01").join("0123456789abcdef0123456789abcdef.tmp"),
+    ];
+    for p in &foreign {
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, vec![7u8; 50_000]).unwrap();
+    }
+    // a stale temp file of our own is cleaned up
+    let own_tmp = dir.join("01").join("0123456789abcdef0123456789abcdef.tmpThreadId9");
+    std::fs::write(&own_tmp, b"partial").unwrap();
+    let d = DiskCache::new(&dir, 40_000);
+    assert_eq!(d.size(), 7, "only the cache's own temp file counts");
+    // fill past the budget (forces prunes), then clear
+    for i in 0..40u8 {
+        d.put(hash_bytes(&[i, 2]), &gradient(160, 100, i));
+    }
+    assert!(d.size() <= 40_000);
+    d.clear();
+    assert_eq!(d.size(), 0);
+    assert!(!own_tmp.exists());
+    for p in &foreign {
+        assert!(p.exists(), "foreign file deleted: {}", p.display());
+    }
+    assert!(disk::is_cache_file("01", "0123456789abcdef0123456789abcdef.jpg"));
+    assert!(!disk::is_cache_file("01", "0123456789abcdef0123456789abcdef.jpg.bak"));
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -145,6 +145,11 @@ impl Node {
 const MAX_DEPTH: usize = 64;
 const MAX_NODES: usize = 200_000;
 
+/// `prefix:local` with the prefix canonicalised by namespace URI (see [`NAMESPACES`]).
+pub(crate) fn canonical_name(qname: &str, scopes: &[Vec<(String, String)>]) -> String {
+    canonical(qname, scopes)
+}
+
 fn canonical(qname: &str, scopes: &[Vec<(String, String)>]) -> String {
     let (prefix, local) = qname.split_once(':').unwrap_or(("", qname));
     if prefix == "xml" || prefix == "xmlns" {

@@ -1,4 +1,4 @@
-use lightcraft_meta::{Metadata, extract, parse_iptc, parse_xmp, read_exif, write_xmp};
+use lightcraft_meta::{MergeRules, Metadata, extract, merge_xmp, parse_iptc, parse_xmp, read_exif, write_xmp};
 use proptest::prelude::*;
 
 proptest! {
@@ -19,6 +19,23 @@ proptest! {
     #[test]
     fn random_text_xmp_never_panics(s in ".{0,400}") {
         let _ = parse_xmp(&s);
+    }
+
+    /// Merging into arbitrary (also damaged) packets never panics, and a merge that succeeds
+    /// reads back with the written values.
+    #[test]
+    fn merge_never_panics(cut in 0usize..900, junk in ".{0,20}", rating in 0i8..=5) {
+        let base = write_xmp(&Metadata { title: Some("t".into()), rating: Some(1), ..Default::default() }, Some("{}"));
+        let mut s: String = base.chars().take(cut).collect();
+        s.push_str(&junk);
+        s.extend(base.chars().skip(cut));
+        let fresh = write_xmp(&Metadata { rating: Some(rating), ..Default::default() }, Some("{\"x\":1}"));
+        let rules = MergeRules { owned: &["xmp:Rating", "dc:title", "lc:*"], owned_if_present: &[] };
+        if let Ok(out) = merge_xmp(&s, &fresh, rules) {
+            let d = parse_xmp(&out).unwrap();
+            prop_assert_eq!(d.metadata.rating, Some(rating));
+            prop_assert_eq!(d.lc_settings.as_deref(), Some("{\"x\":1}"));
+        }
     }
 
     #[test]

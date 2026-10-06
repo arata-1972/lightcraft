@@ -10,24 +10,28 @@ use serde_json::{Value, json};
 use super::{CommandSpec, bad, cmd, has_active, has_selection};
 use crate::{Result, Session};
 
-/// A free `<stem>.dng` (then `<stem>-2.dng`…) next to `path`.
-fn dng_path(path: &str) -> String {
+/// `<stem>.dng`, then `<stem>-2.dng`, `<stem>-3.dng`… next to `path`.
+fn dng_names(path: &str) -> impl Iterator<Item = std::path::PathBuf> {
     let p = Path::new(path);
-    let dir = p.parent().unwrap_or(Path::new(""));
+    let dir = p.parent().unwrap_or(Path::new("")).to_path_buf();
     let stem = p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "photo".into());
-    let mut out = dir.join(format!("{stem}.dng"));
-    let mut n = 2;
-    while out.exists() {
-        out = dir.join(format!("{stem}-{n}.dng"));
-        n += 1;
-    }
-    out.to_string_lossy().to_string()
+    (1u64..).map(move |n| if n == 1 { dir.join(format!("{stem}.dng")) } else { dir.join(format!("{stem}-{n}.dng")) })
 }
 
-/// Write the DNG for raw file `path` (develop settings in `packet`); returns the new path.
-/// An empty `packet` writes no XMP.
+/// Write the DNG for raw file `path` (develop settings in `packet`) next to it under a free name;
+/// returns the new path. An empty `packet` writes no XMP.
+///
+/// The DNG is checked before anyone relies on it (Convert to DNG relinks the photo to it, Copy as
+/// DNG deletes the raw copy): the encoded file must decode to the same raw data, and it is
+/// written to a temp file, synced, read back identical and only then given its name — never
+/// replacing an existing file. On any failure no DNG is left behind and the raw stays in use.
 pub(crate) fn write_dng_for(s: &Session, path: &str, packet: String) -> std::result::Result<String, String> {
-    let bytes = match &s.media.file_bytes {
+    write_dng_with(s.media.file_bytes.as_ref(), path, packet)
+}
+
+/// [`write_dng_for`] without the session (imports convert on a worker thread).
+pub(crate) fn write_dng_with(file_bytes: Option<&crate::merge::ByteReader>, path: &str, packet: String) -> std::result::Result<String, String> {
+    let bytes = match file_bytes {
         Some(r) => r(path)?,
         None => std::fs::read(path).map_err(|e| format!("{path}: {e}"))?,
     };
@@ -35,9 +39,21 @@ pub(crate) fn write_dng_for(s: &Session, path: &str, packet: String) -> std::res
     drop(bytes);
     let dng = lightcraft_raw::write_dng(&raw, &lightcraft_raw::DngWriteOptions { xmp: (!packet.is_empty()).then_some(packet), ..Default::default() })
         .map_err(|e| e.to_string())?;
-    let out = dng_path(path);
-    std::fs::write(&out, dng).map_err(|e| format!("{out}: {e}"))?;
-    Ok(out)
+    let back = lightcraft_raw::decode(&dng).map_err(|e| format!("{path}: the DNG written for it doesn't decode ({e}); the raw is kept"))?;
+    let same = match (&back.data, &raw.data) {
+        (lightcraft_raw::RawData::U16(a), lightcraft_raw::RawData::U16(b)) => a == b,
+        (lightcraft_raw::RawData::F32(a), lightcraft_raw::RawData::F32(b)) => {
+            a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits())
+        }
+        _ => false,
+    };
+    if (back.width, back.height, back.cpp) != (raw.width, raw.height, raw.cpp) || !same {
+        return Err(format!("{path}: the DNG written for it doesn't hold the same raw data; the raw is kept"));
+    }
+    drop((raw, back));
+    let out = lightcraft_catalog::safe_file::write_new_unique(&mut dng_names(path), &dng)
+        .map_err(|e| format!("{path}: could not write its DNG ({e}); the raw is kept"))?;
+    Ok(out.to_string_lossy().to_string())
 }
 
 fn convert(s: &mut Session, p: &Value) -> Result<Value> {
@@ -133,7 +149,7 @@ fn edit_external(s: &mut Session, p: &Value) -> Result<Value> {
     };
     let mut written = Vec::new();
     let mut write = |path: &str, bytes: &[u8]| -> std::result::Result<(), String> {
-        std::fs::write(path, bytes).map_err(|e| format!("{path}: {e}"))?;
+        crate::export::write_file(path, bytes)?;
         written.push(path.to_string());
         Ok(())
     };

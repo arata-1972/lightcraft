@@ -169,6 +169,27 @@ pub(crate) fn place(src: &Path, dir: &Path, name: &str) -> Result<Placed, String
     Ok(placed)
 }
 
+/// Import → **Copy**: copy `src` into `dir` as `name` (-1, -2… when taken) with the same checks as
+/// a move's copy — a new file (never overwriting one, even one that appears meanwhile), synced to
+/// disk and compared byte for byte with the source; a bad copy is removed and reported, so a card
+/// is never wiped on the strength of it. Returns the new path.
+pub(crate) fn copy_new(src: &Path, dir: &Path, name: &str) -> Result<PathBuf, String> {
+    fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((s, e)) if !s.is_empty() => (s.to_string(), format!(".{e}")),
+        _ => (name.to_string(), String::new()),
+    };
+    for i in 0..100_000u32 {
+        let d = if i == 0 { dir.join(name) } else { dir.join(format!("{stem}-{i}{ext}")) };
+        match copy_verified(src, &d) {
+            Ok(()) => return Ok(d),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("copy {}: {e} (nothing was imported from it; the original is untouched)", src.display())),
+        }
+    }
+    Err(format!("copy {}: no free name in {}", src.display(), dir.display()))
+}
+
 /// Undo a [`place`]: remove what it created at the destination (the sources were never touched).
 pub(crate) fn rollback(p: &Placed) {
     for sc in p.sidecars.iter().filter(|s| s.created) {
@@ -213,7 +234,7 @@ pub(crate) fn finish(p: &Placed) -> Result<Vec<(String, String)>, String> {
 }
 
 /// A photo (by extension) still beside a stem-named sidecar, sharing its stem.
-fn sibling_photo(sidecar: &Path) -> Option<String> {
+pub(crate) fn sibling_photo(sidecar: &Path) -> Option<String> {
     let dir = sidecar.parent()?;
     let stem = sidecar.file_stem()?.to_string_lossy().to_string();
     fs::read_dir(dir).ok()?.flatten().map(|e| e.path()).find_map(|f| {

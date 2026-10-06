@@ -116,6 +116,8 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     ("file.addFolder", "Import from Folder…", None, "File"),
     ("file.addFromDevice", "Import from Device", None, ""),
     ("file.findMissing", "Find Missing Photos…", None, "File"),
+    ("file.backupLibrary", "Back Up Library…", None, "File"),
+    ("file.restoreLibrary", "Restore Library from Backup…", None, "File"),
     ("photo.locate", "Locate Missing File…", None, ""),
     ("dialog.saveMetadataPreset", "Save Metadata Preset…", None, ""),
     ("app.quit", "Quit LightCraft", Some("Cmd+Q"), "File"),
@@ -381,6 +383,13 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
             Ok(Value::Null)
         }
         "app.openLibrary" => crate::panels::settings::open_library(app, p),
+        "file.backupLibrary" | "file.restoreLibrary" => {
+            let action = if id == "file.backupLibrary" { app.services.backup_library.as_mut() } else { app.services.restore_library.as_mut() };
+            match action {
+                Some(f) => f(&mut app.session),
+                None => Err("not available here: on the desktop the library is a folder; back it up with your other files".into()),
+            }
+        }
         "view.filmstrip" => {
             app.ui.filmstrip = !app.ui.filmstrip;
             Ok(Value::Null)
@@ -928,13 +937,40 @@ pub fn run_ui_command(app: &mut LightcraftApp, id: &str, p: &Value) -> Option<Re
                 None => app.services.pick_folder.as_mut().and_then(|f| f()),
             };
             let Some(folder) = folder else { return Some(Ok(Value::Null)) };
-            let r = app.run("library.findMissing", json!({"folder": folder}));
-            if let Ok(v) = &r {
-                let n = v["found"].as_array().map_or(0, Vec::len);
-                let left = v["missing"].as_u64().unwrap_or(0);
-                app.toast(&egui::Context::default(), format!("Found {n} missing photo{}; {left} still missing", if n == 1 { "" } else { "s" }));
+            // the search (checking every photo's file, walking the folder) runs on a worker thread;
+            // the relinking happens back here, as one undo step
+            const LABEL: &str = "Find Missing Photos";
+            if app.tasks.is_running(LABEL) {
+                return Some(Err("Find Missing Photos is already searching".into()));
             }
-            r
+            let candidates = lightcraft_engine::cmd::missing::find_candidates(&app.session.catalog);
+            let work = move || lightcraft_engine::cmd::missing::plan_find_missing(&candidates, &folder);
+            let done = |app: &mut LightcraftApp, ctx: &egui::Context, plan: Result<lightcraft_engine::cmd::missing::FindPlan, String>| {
+                // relinked under the session as it is now: photos relinked meanwhile and files
+                // now in use are skipped
+                let r = plan.and_then(|plan| app.run("library.findMissing", plan.to_json()));
+                match r {
+                    Ok(v) => {
+                        let n = v["found"].as_array().map_or(0, Vec::len);
+                        let left = v["missing"].as_u64().unwrap_or(0);
+                        let unsure = v["ambiguous"].as_array().map_or(0, Vec::len);
+                        let unsure = if unsure > 0 { format!(" ({unsure} with several look-alike files: use Locate)") } else { String::new() };
+                        app.toast(ctx, format!("Found {n} missing photo{}; {left} still missing{unsure}", if n == 1 { "" } else { "s" }));
+                        app.ui.last_find_missing = Some(v);
+                    }
+                    Err(e) => app.toast(ctx, e),
+                }
+            };
+            app.ui.last_find_missing = None;
+            if let Err(e) = crate::tasks::spawn(app, LABEL, work, done) {
+                return Some(Err(e));
+            }
+            if p.get("wait").and_then(Value::as_bool).unwrap_or(false) {
+                let ctx = app.tasks.repaint.clone().unwrap_or_default();
+                crate::tasks::wait(app, &ctx, std::time::Duration::from_secs(600));
+                return Some(Ok(app.ui.last_find_missing.clone().unwrap_or(Value::Null)));
+            }
+            Ok(json!({"background": true}))
         }
         "photo.tagFromTracklog" => {
             // a GPX file → GPS for the selected photos by capture time (one undo step)
@@ -1194,6 +1230,8 @@ pub fn ui_enabled(app: &LightcraftApp, id: &str) -> bool {
         "view.compare" => app.session.catalog.len() > 1,
         "view.fullScreenPreview" | "view.infoOverlay" | "view.navigator" => app.session.active().is_some() || app.ui.fullscreen,
         "app.openLibrary" | "file.addFolder" => app.services.pick_folder.is_some(),
+        "file.backupLibrary" => app.services.backup_library.is_some(),
+        "file.restoreLibrary" => app.services.restore_library.is_some(),
         "compare.swap" | "compare.makeSelect" => app.ui.view == ViewMode::Compare,
         s if s.starts_with("dialog.merge") || (s.starts_with("merge.") && s.ends_with("Last")) => {
             app.session.targets(&serde_json::json!({})).len() >= 2 && app.merge.final_task.is_none()

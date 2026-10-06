@@ -5,6 +5,11 @@
 //!   snapshot — crash-safe and diff-friendly (see [`journal`]);
 //! - **undo/redo**: the engine keeps inverse ops;
 //! - **determinism**: replaying the log reproduces the state exactly (property-tested).
+//!
+//! **Catalog format version** ([`journal::VERSION`], see [`journal`] → *Format versions*): adding
+//! an [`Op`] variant or a serialized field means bumping it. Newer builds read every older format
+//! (and upgrade it on open); older builds refuse a newer library with [`CatalogError::Newer`]
+//! instead of reading part of it.
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
@@ -12,9 +17,11 @@ pub mod dates;
 pub mod journal;
 pub mod keywords;
 pub mod local;
+pub mod lock;
 pub mod model;
 pub mod query;
 pub mod rules;
+pub mod safe_file;
 pub mod stacks;
 pub mod store;
 
@@ -26,6 +33,7 @@ pub use journal::{Journal, LoadReport, PersistStats, SnapshotPolicy, SnapshotTim
 pub use keywords::KeywordNode;
 use lightcraft_develop::DevelopSettings;
 pub use local::{DEFAULT_FORGET_DAYS, ForgetPlan, folder_of};
+pub use lock::{LibraryLock, LockError, LockOwner};
 pub use model::*;
 pub use query::{DateGroup, Filter, RatingOp, Sort, SortKey};
 pub use rules::{Match, Rule, RuleSet};
@@ -46,6 +54,10 @@ pub enum CatalogError {
     Corrupt(String),
     #[error("catalog storage: {0}")]
     Io(String),
+    /// The library was written by a newer LightCraft (a newer catalog format, or a change this
+    /// version doesn't know). Nothing was read into the session and nothing was modified.
+    #[error("this library was written by a newer version of LightCraft ({0}); update LightCraft to open it. The library was left unchanged.")]
+    Newer(String),
 }
 
 pub type Result<T> = std::result::Result<T, CatalogError>;
@@ -255,6 +267,28 @@ impl Catalog {
     }
     pub fn photos(&self) -> impl Iterator<Item = &Arc<Photo>> {
         self.photos.values()
+    }
+
+    /// Schema/default-policy migration: only untouched legacy Sony factory defaults change.
+    /// Custom edits, import presets and browsed Local records are preserved. Replay happens
+    /// first, so a durable user edit always wins over this idempotent default upgrade.
+    pub(crate) fn upgrade_arw_defaults(&mut self) {
+        for photo in self.photos.values_mut() {
+            if !photo.relative_wb()
+                || photo.import_look.is_some()
+                || photo.edited.is_some()
+                || photo.local
+                || photo.develop.wb.mode != lightcraft_develop::WbMode::AsShot
+            {
+                continue;
+            }
+            let mut legacy = DevelopSettings::for_raw(photo.develop.wb.temp, photo.develop.wb.tint);
+            legacy.optics.lens_profile = photo.embedded_lens.is_some();
+            if *photo.develop == legacy {
+                let defaults = photo.camera_defaults();
+                Arc::make_mut(photo).develop = Arc::new(defaults);
+            }
+        }
     }
     pub fn len(&self) -> usize {
         self.photos.len()
@@ -643,6 +677,12 @@ mod tests;
 #[cfg(test)]
 mod tests_background;
 #[cfg(test)]
+mod tests_format_version;
+#[cfg(test)]
 mod tests_journal;
 #[cfg(test)]
 mod tests_local;
+#[cfg(test)]
+mod tests_lock;
+#[cfg(test)]
+mod tests_torn_append;

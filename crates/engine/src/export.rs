@@ -987,6 +987,8 @@ pub struct PreparedExport {
     pub photo: lightcraft_catalog::PhotoId,
     pub file_name: String,
     work: Work,
+    /// The library's originals, which [`run_batch`] never writes over (shared by a batch).
+    guard: std::sync::Arc<crate::originals::OriginalGuard>,
 }
 
 struct RenderWork {
@@ -1009,12 +1011,30 @@ enum Work {
     },
 }
 
-/// Set up the export of photo `id` at 1-based position `seq` of a batch.
+/// Set up the export of photo `id` at 1-based position `seq` of a batch. (For a whole batch use
+/// [`prepare_batch`]: it looks at the library's originals once.)
 pub fn prepare_export(
     session: &mut crate::Session,
     id: lightcraft_catalog::PhotoId,
     o: &ExportOptions,
     seq: usize,
+) -> Result<PreparedExport, String> {
+    let guard = std::sync::Arc::new(session.original_guard());
+    prepare_guarded(session, id, o, seq, guard)
+}
+
+/// [`prepare_export`] for each of `ids` in order (`{seq}` = position, from 1).
+pub fn prepare_batch(session: &mut crate::Session, ids: &[lightcraft_catalog::PhotoId], o: &ExportOptions) -> Result<Vec<PreparedExport>, String> {
+    let guard = std::sync::Arc::new(session.original_guard());
+    ids.iter().enumerate().map(|(i, id)| prepare_guarded(session, *id, o, i + 1, guard.clone())).collect()
+}
+
+fn prepare_guarded(
+    session: &mut crate::Session,
+    id: lightcraft_catalog::PhotoId,
+    o: &ExportOptions,
+    seq: usize,
+    guard: std::sync::Arc<crate::originals::OriginalGuard>,
 ) -> Result<PreparedExport, String> {
     let p = session.catalog.photo(id).ok_or("no such photo")?;
     let file_name = o.file_name_for(p, seq);
@@ -1036,7 +1056,7 @@ pub fn prepare_export(
             size: (p.width as usize, p.height as usize),
         }
     };
-    Ok(PreparedExport { photo: id, file_name, work })
+    Ok(PreparedExport { photo: id, file_name, work, guard })
 }
 
 impl PreparedExport {
@@ -1088,14 +1108,16 @@ pub enum DngCompression {
 }
 
 /// The destination of a batch: a folder (with `ExportOptions::subfolder` and the conflict policy
-/// applied), or one exact file path (single photo; overwritten).
+/// applied to each file together with its sidecars), or one exact file path (single photo; an
+/// ordinary file already there is replaced). Either way a catalogued original (or its sidecar)
+/// is never written over: see [`crate::originals`].
 #[derive(Clone, Debug, Default)]
 pub struct Destination {
     pub dir: String,
     pub exact: Option<String>,
 }
 
-/// Export `ids` in order ([`prepare_export`] + [`run_batch`]), stopping at the first error.
+/// Export `ids` in order ([`prepare_batch`] + [`run_batch`]), stopping at the first error.
 pub fn export_batch(
     session: &mut crate::Session,
     ids: &[lightcraft_catalog::PhotoId],
@@ -1104,15 +1126,34 @@ pub fn export_batch(
     write: &mut dyn FnMut(&str, &[u8]) -> Result<(), String>,
     exists: &dyn Fn(&str) -> bool,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let items = ids.iter().enumerate().map(|(i, id)| prepare_export(session, *id, o, i + 1)).collect::<Result<Vec<_>, _>>()?;
+    let items = prepare_batch(session, ids, o)?;
     run_batch(items, o, to, write, exists, true, &mut |_, _| true)
 }
 
+/// Write an exported or rendered file on disk: its folder is created if needed, and the file is
+/// replaced atomically ([`lightcraft_catalog::safe_file::write_atomic`]: a temp file, synced, then
+/// renamed), so a failure part-way leaves any previous file intact and no truncated one. The
+/// native writer behind exports, renders and screenshots (app, CLI, MCP).
+pub fn write_file(path: &str, bytes: &[u8]) -> Result<(), String> {
+    let p = std::path::Path::new(path);
+    if let Some(dir) = p.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
+    lightcraft_catalog::safe_file::write_atomic(p, bytes).map_err(|e| format!("{path}: {e}"))
+}
+
+/// The path of the sidecar with extension `ext` of the exported file `main`.
+fn sidecar_path(main: &str, ext: &str) -> String {
+    std::path::Path::new(main).with_extension(ext).to_string_lossy().to_string()
+}
+
 /// Run prepared exports in order: pick each one's path, and hand the bytes (and sidecars) to
-/// `write`. `exists` tells whether a path is taken (conflict policy). `progress(done, next file)`
-/// is called before each photo; returning false cancels the rest. Returns one JSON object per
-/// photo: `{path, width, height, bytes, sidecars}`, `{skipped: path}` or (unless
-/// `stop_on_error`) `{photo, file, error}`.
+/// `write`. `exists` tells whether a path is taken. The conflict policy applies to a file and its
+/// sidecars as one: with Unique both get the same free name, with Skip the photo is skipped when
+/// either is taken. A path that is a catalogued original (or its sidecar) is refused whatever the
+/// policy. `progress(done, next file)` is called before each photo; returning false cancels the
+/// rest. Returns one JSON object per photo: `{path, width, height, bytes, sidecars}`,
+/// `{skipped: path}` or (unless `stop_on_error`) `{photo, file, error}`.
 pub fn run_batch(
     items: Vec<PreparedExport>,
     o: &ExportOptions,
@@ -1132,7 +1173,7 @@ pub fn run_batch(
         if !progress(i, &item.file_name) {
             break;
         }
-        let (photo, name) = (item.photo, item.file_name.clone());
+        let (photo, name, guard) = (item.photo, item.file_name.clone(), item.guard.clone());
         let e = match item.run() {
             Ok(e) => e,
             Err(err) if stop_on_error => return Err(err),
@@ -1141,14 +1182,18 @@ pub fn run_batch(
                 continue;
             }
         };
+        // the exported file and its sidecars
+        let group = |main: &str| std::iter::once(main.to_string()).chain(e.sidecars.iter().map(|(x, _)| sidecar_path(main, x))).collect::<Vec<_>>();
         let path = match to.exact.as_deref().filter(|_| single) {
-            Some(p) => p.to_string(),
+            Some(p) => Ok(p.to_string()),
             None => {
-                let mut path = join(&dir, &e.file_name);
-                let busy = |p: &str, taken: &std::collections::HashSet<String>| taken.contains(p) || exists(p);
-                if busy(&path, &taken) {
+                let path = join(&dir, &e.file_name);
+                let busy = |main: &str| group(main).iter().any(|p| taken.contains(p) || exists(p));
+                if !busy(&path) {
+                    Ok(path)
+                } else {
                     match o.conflict {
-                        Conflict::Overwrite => {}
+                        Conflict::Overwrite => Ok(path),
                         Conflict::Skip => {
                             out.push(json!({"skipped": path}));
                             continue;
@@ -1156,29 +1201,34 @@ pub fn run_batch(
                         Conflict::Unique => {
                             let (stem, ext) = e.file_name.rsplit_once('.').map_or((e.file_name.as_str(), None), |(a, b)| (a, Some(b)));
                             let name = |n: usize| join(&dir, &ext.map_or(format!("{stem}-{n}"), |x| format!("{stem}-{n}.{x}")));
-                            path = (2..).map(name).find(|p| !busy(p, &taken)).expect("a free name");
+                            (2..1_000_000).map(name).find(|p| !busy(p)).ok_or_else(|| format!("{path}: no free file name"))
                         }
                     }
                 }
-                path
             }
         };
-        let written = write(&path, &e.bytes).and_then(|()| {
-            let mut sidecars = Vec::new();
-            for (ext, bytes) in &e.sidecars {
-                let sc = std::path::Path::new(&path).with_extension(ext).to_string_lossy().to_string();
-                write(&sc, bytes)?;
-                sidecars.push(sc);
+        let file = path.clone().unwrap_or_else(|_| name.clone());
+        let written = path.and_then(|path| {
+            let files = group(&path);
+            // never over an original, whatever the conflict policy or the exact path said
+            for f in &files {
+                guard.check(std::path::Path::new(f))?;
             }
-            Ok(sidecars)
+            write(&path, &e.bytes)?;
+            let mut sidecars = Vec::new();
+            for ((_, bytes), sc) in e.sidecars.iter().zip(files.iter().skip(1)) {
+                write(sc, bytes)?;
+                sidecars.push(sc.clone());
+            }
+            Ok((path, files, sidecars))
         });
         match written {
-            Ok(sidecars) => {
-                taken.insert(path.clone());
+            Ok((path, files, sidecars)) => {
+                taken.extend(files);
                 out.push(json!({"path": path, "width": e.width, "height": e.height, "bytes": e.bytes.len(), "sidecars": sidecars}));
             }
             Err(err) if stop_on_error => return Err(err),
-            Err(err) => out.push(json!({"photo": photo.0, "file": path, "error": err})),
+            Err(err) => out.push(json!({"photo": photo.0, "file": file, "error": err})),
         }
     }
     Ok(out)

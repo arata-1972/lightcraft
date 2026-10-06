@@ -49,6 +49,8 @@ struct Mirror {
     files: BTreeMap<String, Vec<u8>>,
     /// Dirty files, least recently modified first.
     dirty: Vec<(String, Dirty)>,
+    /// Why the last flush to browser storage failed (quota, eviction…), until one succeeds.
+    error: Option<String>,
 }
 
 impl Mirror {
@@ -138,6 +140,18 @@ impl Files {
         }
     }
 
+    /// Record the outcome of a flush to browser storage: `Some(why)` when it failed, `None` once
+    /// one succeeds. While a flush is failing, the catalog [`Store`] refuses new writes, so the
+    /// engine keeps the changes queued and reports them unsaved (`library.info` → `unsavedOps`,
+    /// the top bar's warning) instead of pretending they were saved.
+    pub fn set_error(&self, e: Option<String>) {
+        self.lock().error = e;
+    }
+
+    pub fn error(&self) -> Option<String> {
+        self.lock().error.clone()
+    }
+
     /// A catalog [`Store`] over these files.
     pub fn store(&self) -> FilesStore {
         FilesStore(self.clone())
@@ -147,19 +161,32 @@ impl Files {
 /// [`Store`] implementation over [`Files`].
 pub struct FilesStore(Files);
 
+impl FilesStore {
+    /// Writes fail while browser storage does (see [`Files::set_error`]).
+    fn writable(&self) -> io::Result<()> {
+        match self.0.error() {
+            Some(e) => Err(io::Error::other(format!("browser storage: {e}"))),
+            None => Ok(()),
+        }
+    }
+}
+
 impl Store for FilesStore {
     fn read(&mut self, name: &str) -> io::Result<Option<Vec<u8>>> {
         Ok(self.0.get(name))
     }
     fn write_atomic(&mut self, name: &str, data: &[u8]) -> io::Result<()> {
+        self.writable()?;
         self.0.write(name, data);
         Ok(())
     }
     fn append(&mut self, name: &str, data: &[u8]) -> io::Result<()> {
+        self.writable()?;
         self.0.append(name, data);
         Ok(())
     }
     fn truncate(&mut self, name: &str, len: u64) -> io::Result<()> {
+        self.writable()?;
         self.0.truncate(name, len as usize);
         Ok(())
     }
@@ -222,6 +249,37 @@ mod tests {
         f.write("catalog.log", b"");
         let names: Vec<_> = f.take_dirty().iter().map(|o| o.name().to_string()).collect();
         assert_eq!(names, ["catalog.snap", "catalog.log"]);
+    }
+
+    /// A failing flush (quota exceeded, storage evicted) is not silent: commands report the change
+    /// as unsaved and the engine keeps it queued; once storage works again it is written.
+    #[test]
+    fn flush_failures_show_as_unsaved_and_are_retried() {
+        let mut disk = BTreeMap::new();
+        let files = Files::default();
+        let mut s = Session::new();
+        let stores = LibraryStores { dir: "browser".into(), catalog: Box::new(files.store()), files: Box::new(files.store()), on_disk: false };
+        s.open_library_in(stores, true).unwrap();
+        flush(&files, &mut disk);
+        files.set_error(Some("QuotaExceededError".into()));
+        let r = s.execute("photo.rate", &json!({"rating": 5}));
+        assert!(matches!(r, Err(lightcraft_engine::EngineError::NotSaved(_))), "{r:?}");
+        let (ops, why) = s.unsaved().unwrap();
+        assert!(ops > 0 && why.contains("QuotaExceeded"), "{why}");
+        files.set_error(None);
+        s.persist_if_dirty();
+        s.persist().unwrap();
+        assert!(s.unsaved().is_none(), "written once storage works again");
+        flush(&files, &mut disk);
+        let id = s.selection.active.unwrap();
+        let files2 = Files::default();
+        for (k, v) in &disk {
+            files2.preload(k, v.clone());
+        }
+        let mut s2 = Session::new();
+        let stores = LibraryStores { dir: "browser".into(), catalog: Box::new(files2.store()), files: Box::new(files2.store()), on_disk: false };
+        s2.open_library_in(stores, true).unwrap();
+        assert_eq!(s2.catalog.photo(id).unwrap().rating, 5, "the rating survived");
     }
 
     #[test]

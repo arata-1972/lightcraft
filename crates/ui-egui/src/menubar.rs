@@ -67,6 +67,8 @@ const LAYOUT: &[(&str, &[&str])] = &[
             "@Import from Device",
             "---",
             "app.openLibrary",
+            "file.backupLibrary",
+            "file.restoreLibrary",
             "---",
             "dialog.newAlbum",
             "dialog.newFolder",
@@ -250,6 +252,15 @@ const HIDDEN: &[&str] = &[
     "preset.create",
 ];
 
+/// Items only some hosts have are left out of the others' menus (the web build's library backup).
+fn host_supports(app: &LightcraftApp, id: &str) -> bool {
+    match id {
+        "file.backupLibrary" => app.services.backup_library.is_some(),
+        "file.restoreLibrary" => app.services.restore_library.is_some(),
+        _ => true,
+    }
+}
+
 fn item(id: &str, params: Value, label: impl Into<String>, shortcut: Option<&str>, enabled: bool, checked: Option<bool>) -> MenuNode {
     MenuNode::Item { id: id.into(), params, label: label.into(), shortcut: shortcut.map(str::to_string), enabled, checked }
 }
@@ -338,20 +349,21 @@ fn expanded(app: &LightcraftApp, name: &str) -> Option<Vec<MenuNode>> {
                 item("library.buildPreviews", json!({"size": "full"}), format!("Build 1:1 Previews ({scope})"), None, !running, None),
                 item("library.cancelPreviews", Value::Null, "Stop Building Previews", None, running, None),
                 MenuNode::Separator,
+                // (read and written on a worker thread: the originals may be on a slow drive)
                 item(
                     "library.smartPreviews",
-                    Value::Null,
+                    json!({"background": true}),
                     format!("Build Smart Previews ({scope})"),
                     None,
-                    app.session.media.smart_dir.is_some(),
+                    app.session.media.smart_dir.is_some() && !running,
                     None,
                 ),
                 item(
                     "library.smartPreviews",
-                    json!({"discard": true}),
+                    json!({"discard": true, "background": true}),
                     format!("Discard Smart Previews ({scope})"),
                     None,
-                    app.session.media.smart_dir.is_some(),
+                    app.session.media.smart_dir.is_some() && !running,
                     None,
                 ),
                 MenuNode::Separator,
@@ -557,7 +569,8 @@ fn tidy(v: Vec<MenuNode>) -> Vec<MenuNode> {
 
 /// The whole menu bar: (title, items) per menu in [`MENUS`] order.
 pub fn menu_bar(app: &LightcraftApp) -> Vec<(String, Vec<MenuNode>)> {
-    let entries: Vec<MenuEntry> = crate::menus::menu_entries(app).into_iter().filter(|e| !HIDDEN.contains(&e.id.as_str())).collect();
+    let entries: Vec<MenuEntry> =
+        crate::menus::menu_entries(app).into_iter().filter(|e| !HIDDEN.contains(&e.id.as_str()) && host_supports(app, &e.id)).collect();
     let mut used = vec![false; entries.len()];
     let mut bar = Vec::new();
     for title in MENUS {
@@ -780,6 +793,34 @@ mod tests {
         assert!(!text.contains("Add Folder") && !text.contains("\"Add Photos"), "no add-folder wording left in the menus");
     }
 
+    /// Back Up / Restore Library are the browser build's (its library lives in browser storage):
+    /// absent from the desktop's menus, present and wired to the host where it provides them.
+    #[test]
+    fn library_backup_items_follow_the_host() {
+        let all = |app: &LightcraftApp| -> Vec<MenuNode> { menu_bar(app).into_iter().flat_map(|(_, v)| v).collect() };
+        let mut desktop = app();
+        assert!(find(&all(&desktop), "file.backupLibrary").is_none() && find(&all(&desktop), "file.restoreLibrary").is_none());
+        assert!(run_item(&mut desktop, "file.backupLibrary", Value::Null).is_err(), "not available without the host");
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+        let c = calls.clone();
+        let services = crate::Services {
+            backup_library: Some(Box::new(move |s: &mut lightcraft_engine::Session| {
+                c.set(c.get() + 1);
+                Ok(json!({"photos": s.catalog.len()}))
+            })),
+            restore_library: Some(Box::new(|_: &mut lightcraft_engine::Session| Ok(json!({"started": true})))),
+            ..Default::default()
+        };
+        let mut web = LightcraftApp::new(lightcraft_engine::Session::with_demo(), services);
+        let bar = all(&web);
+        for id in ["file.backupLibrary", "file.restoreLibrary"] {
+            assert!(matches!(find(&bar, id), Some(MenuNode::Item { enabled: true, .. })), "{id}");
+        }
+        let r = run_item(&mut web, "file.backupLibrary", Value::Null).unwrap();
+        assert!(r["photos"].as_u64().unwrap() > 0);
+        assert_eq!(calls.get(), 1);
+    }
+
     #[test]
     fn bar_follows_the_registry_and_state() {
         let mut app = app();
@@ -942,7 +983,7 @@ mod tests {
         let mut app = LightcraftApp::new(lightcraft_engine::Session::new().with_fs(), Default::default());
         app.session.execute("library.import", &json!({"paths": [dir.join("a").to_string_lossy()]})).unwrap();
         std::fs::rename(dir.join("a/one.png"), dir.join("b/one.png")).unwrap();
-        let r = run_item(&mut app, "file.findMissing", json!({"folder": dir.join("b").to_string_lossy()})).unwrap();
+        let r = run_item(&mut app, "file.findMissing", json!({"folder": dir.join("b").to_string_lossy(), "wait": true})).unwrap();
         assert_eq!(r["found"].as_array().map(Vec::len), Some(1), "{r}");
         // Locate: an explicit file
         std::fs::rename(dir.join("b/one.png"), dir.join("one-renamed.png")).unwrap();

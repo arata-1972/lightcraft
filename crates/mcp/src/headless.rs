@@ -78,12 +78,7 @@ impl Headless {
             None => vec![self.photo_or_active(p)?],
         };
         let dir = p.get("dir").and_then(Value::as_str).unwrap_or("");
-        let write = &mut |path: &str, bytes: &[u8]| {
-            if let Some(parent) = Path::new(path).parent().filter(|d| !d.as_os_str().is_empty()) {
-                std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
-            }
-            std::fs::write(path, bytes).map_err(|err| format!("{path}: {err}"))
-        };
+        let write = &mut lightcraft_engine::export::write_file;
         let files =
             export_batch(&mut self.session, &ids, &opts, &Destination { dir: dir.to_string(), exact: exact.map(str::to_string) }, write, &|path| {
                 Path::new(path).exists()
@@ -118,6 +113,7 @@ impl Backend for Headless {
                 let img = self.render(&p, 1600)?;
                 match p.get("path").and_then(Value::as_str) {
                     Some(path) => {
+                        self.session.check_write_target(path)?;
                         write_image(Path::new(path), &img, 92)?;
                         Ok(json!({"path": path, "width": img.width, "height": img.height}))
                     }
@@ -183,7 +179,7 @@ pub fn encode_image(ext: &str, img: &Rgba8, quality: u8) -> Result<Vec<u8>, Stri
 pub fn write_image(path: &Path, img: &Rgba8, quality: u8) -> Result<(), String> {
     let ext = path.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
     let bytes = encode_image(&ext, img, quality)?;
-    std::fs::write(path, bytes).map_err(|e| format!("{}: {e}", path.display()))
+    lightcraft_engine::export::write_file(&path.to_string_lossy(), &bytes)
 }
 
 #[cfg(test)]

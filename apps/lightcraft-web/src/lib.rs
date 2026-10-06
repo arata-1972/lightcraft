@@ -16,6 +16,7 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+pub mod backup;
 pub mod bench;
 pub mod files;
 pub mod store;
@@ -23,6 +24,8 @@ pub mod wire;
 
 #[cfg(target_arch = "wasm32")]
 mod backend;
+#[cfg(target_arch = "wasm32")]
+mod safety;
 #[cfg(target_arch = "wasm32")]
 mod web;
 #[cfg(target_arch = "wasm32")]

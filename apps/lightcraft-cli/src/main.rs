@@ -91,6 +91,17 @@ USAGE:
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
 
+/// Why `--library DIR` can't be opened; for a library open in another program, how to work with
+/// that one instead (issue #99).
+fn library_error(dir: &str, e: lightcraft_engine::EngineError) -> String {
+    match e {
+        lightcraft_engine::EngineError::LibraryInUse(why) => format!(
+            "{dir}: {why}\nTo work with the library while the app has it open, start the app with `--control PORT` and use `lightcraft-cli mcp --connect 127.0.0.1:PORT`."
+        ),
+        e => format!("{dir}: {e}"),
+    }
+}
+
 fn main() -> ExitCode {
     // `--features dhat-heap`: count allocations; the profile is written when `_heap` drops
     // (LIGHTCRAFT_DHAT_FILE, default dhat-heap.json).
@@ -182,7 +193,7 @@ fn mcp(args: &[String]) -> Result<(), String> {
             let mut h = match &library {
                 Some(dir) => {
                     let mut h = Headless::default();
-                    let r = h.session.open_library(dir, demo).map_err(|e| e.to_string())?;
+                    let r = h.session.open_library(dir, demo).map_err(|e| library_error(dir, e))?;
                     eprintln!("lightcraft-cli mcp: opened library {dir} ({r:?})");
                     h
                 }
@@ -419,7 +430,7 @@ fn run(args: &[String]) -> Result<(), String> {
             let mut h = match &library {
                 Some(dir) => {
                     let mut h = Headless::default();
-                    h.session.open_library(dir, demo).map_err(|e| e.to_string())?;
+                    h.session.open_library(dir, demo).map_err(|e| library_error(dir, e))?;
                     h
                 }
                 None if demo => Headless::demo(),
@@ -533,11 +544,17 @@ fn render(args: &[String]) -> Result<(), String> {
             .ok_or_else(|| format!("{output}: unknown extension (use .jpg .png .tif .webp .avif .dng or --opt format=…)"))?;
     }
     let e = export_photo(&mut s, lightcraft_engine::catalog::PhotoId(id), &o, 1)?;
-    std::fs::write(&output, &e.bytes).map_err(|err| format!("{output}: {err}"))?;
-    for (ext, bytes) in &e.sidecars {
-        let sc = Path::new(&output).with_extension(ext);
-        std::fs::write(&sc, bytes).map_err(|err| format!("{}: {err}", sc.display()))?;
-        eprintln!("lightcraft-cli: wrote {}", sc.display());
+    // never over the input (or its sidecar), however it is spelled: `render IMG.jpg -o IMG.jpg`
+    let sidecars: Vec<(String, &Vec<u8>)> =
+        e.sidecars.iter().map(|(ext, bytes)| (Path::new(&output).with_extension(ext).to_string_lossy().to_string(), bytes)).collect();
+    let guard = s.original_guard();
+    for p in std::iter::once(&output).chain(sidecars.iter().map(|(p, _)| p)) {
+        guard.check(Path::new(p)).map_err(|err| format!("render: {err}"))?;
+    }
+    lightcraft_engine::export::write_file(&output, &e.bytes)?;
+    for (sc, bytes) in &sidecars {
+        lightcraft_engine::export::write_file(sc, bytes)?;
+        eprintln!("lightcraft-cli: wrote {sc}");
     }
     eprintln!("lightcraft-cli: wrote {output} ({}×{})", e.width, e.height);
     Ok(())
@@ -580,7 +597,7 @@ fn snapshot(args: &[String]) -> Result<(), String> {
     let mut session = match &library {
         Some(dir) => {
             let mut s = Session::new().with_fs();
-            s.open_library(dir, false).map_err(|e| format!("{dir}: {e}"))?;
+            s.open_library(dir, false).map_err(|e| library_error(dir, e))?;
             s
         }
         None if files.is_empty() => Session::with_demo().with_fs(),
@@ -593,18 +610,8 @@ fn snapshot(args: &[String]) -> Result<(), String> {
         eprintln!("lightcraft-cli snapshot: imported {n} files in {:.0} ms", ti.elapsed().as_secs_f64() * 1e3);
     }
     let services = lightcraft_ui_egui::Services {
-        write_shared: Some(std::sync::Arc::new(|p: &str, b: &[u8]| {
-            if let Some(dir) = Path::new(p).parent().filter(|d| !d.as_os_str().is_empty()) {
-                std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-            }
-            std::fs::write(p, b).map_err(|e| format!("{p}: {e}"))
-        })),
-        write: Some(Box::new(|p: &str, b: &[u8]| {
-            if let Some(dir) = Path::new(p).parent().filter(|d| !d.as_os_str().is_empty()) {
-                std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-            }
-            std::fs::write(p, b).map_err(|e| format!("{p}: {e}"))
-        })),
+        write_shared: Some(std::sync::Arc::new(lightcraft_engine::export::write_file)),
+        write: Some(Box::new(lightcraft_engine::export::write_file)),
         png: Some(Box::new(|img: &lightcraft_raster::Rgba8| {
             lightcraft_codecs::encode_png(&lightcraft_codecs::EncodeImage::rgba8(img), &lightcraft_codecs::EncodeMeta::default()).unwrap_or_default()
         })),

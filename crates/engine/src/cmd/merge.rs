@@ -30,7 +30,8 @@ fn run(s: &mut Session, id: &str, p: &Value) -> Result<Value> {
     if let (Some(path), Some(img)) = (str_param(p, "previewPath"), &out.preview) {
         let png = lightcraft_codecs::encode_png(&lightcraft_codecs::EncodeImage::rgba8(img), &lightcraft_codecs::EncodeMeta::default())
             .map_err(|e| bad(id, e.to_string()))?;
-        std::fs::write(path, png).map_err(|e| bad(id, format!("{path}: {e}")))?;
+        s.check_write_target(path).map_err(|e| bad(id, e))?;
+        crate::export::write_file(path, &png).map_err(|e| bad(id, e))?;
         info["previewPath"] = json!(path);
     }
     if let Some(img) = &out.preview {

@@ -201,7 +201,8 @@ fn local_section(app: &mut LightcraftApp, ui: &mut egui::Ui) {
         for (name, sub) in [("Pictures", "Pictures"), ("Desktop", "Desktop"), ("Downloads", "Downloads"), ("Home", "")] {
             // joined with the platform's separator, like the paths browsing gives back
             let p = if sub.is_empty() { home.clone() } else { std::path::Path::new(&home).join(sub).to_string_lossy().to_string() };
-            if std::path::Path::new(&p).is_dir() {
+            // (checked off the UI thread: a home folder can be on a network share)
+            if fs_cached(ui, "is-dir", &p, 5.0, |p| std::path::Path::new(p).is_dir()) == Some(true) {
                 builtin.push((name.to_string(), p));
             }
         }
@@ -306,15 +307,13 @@ pub(crate) fn local_places(
     out
 }
 
-/// The subfolders of `path` (not hidden ones), sorted; listed at most every 2 s per folder.
+/// The subfolders of `path` (not hidden ones), sorted; listed on a worker thread at most every
+/// 2 s per folder (empty until the first listing).
 fn subfolders(ui: &egui::Ui, path: &str) -> Vec<(String, String)> {
-    let id = egui::Id::new(("subfolders", path.to_string()));
-    let now = ui.input(|i| i.time);
-    if let Some((t, v)) = ui.data(|d| d.get_temp::<(f64, Vec<(String, String)>)>(id))
-        && now - t < 2.0
-    {
-        return v;
-    }
+    fs_cached(ui, "subfolders", path, 2.0, list_subfolders).unwrap_or_default()
+}
+
+fn list_subfolders(path: &str) -> Vec<(String, String)> {
     let mut v: Vec<(String, String)> = std::fs::read_dir(path)
         .map(|rd| {
             rd.flatten()
@@ -327,8 +326,57 @@ fn subfolders(ui: &egui::Ui, path: &str) -> Vec<(String, String)> {
         })
         .unwrap_or_default();
     v.sort_by_key(|(n, _)| n.to_lowercase());
-    ui.data_mut(|d| d.insert_temp(id, (now, v.clone())));
     v
+}
+
+/// A file-system answer for `path` (`f(path)`), kept per `kind` and path and refreshed on a worker
+/// thread at most every `every` seconds: a folder on a sleeping NAS, a dropped share or a
+/// spinning-up drive never blocks a frame. `None` until the first answer arrives.
+pub(crate) fn fs_cached<T: Clone + Send + 'static>(ui: &egui::Ui, kind: &'static str, path: &str, every: f64, f: fn(&str) -> T) -> Option<T> {
+    struct Entry<T> {
+        value: Option<T>,
+        at: Option<f64>,
+        running: bool,
+    }
+    type Cell<T> = std::sync::Arc<std::sync::Mutex<Entry<T>>>;
+    let id = egui::Id::new(("fs-cached", kind, path.to_string()));
+    let now = ui.input(|i| i.time);
+    let cell: Cell<T> = match ui.data(|d| d.get_temp::<Cell<T>>(id)) {
+        Some(c) => c,
+        None => {
+            let c: Cell<T> = std::sync::Arc::new(std::sync::Mutex::new(Entry { value: None, at: None, running: false }));
+            ui.data_mut(|d| d.insert_temp(id, c.clone()));
+            c
+        }
+    };
+    let lock = |c: &Cell<T>| c.lock().unwrap_or_else(std::sync::PoisonError::into_inner).value.clone();
+    let start = {
+        let mut e = cell.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let due = !e.running && e.at.is_none_or(|at| now - at >= every || now < at);
+        if due {
+            e.running = true;
+            e.at = Some(now);
+        }
+        due
+    };
+    if start {
+        let (out, path, repaint) = (cell.clone(), path.to_string(), ui.ctx().clone());
+        let work = move || {
+            let v = f(&path);
+            let mut e = out.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            e.value = Some(v);
+            e.running = false;
+            drop(e);
+            repaint.request_repaint();
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        if std::thread::Builder::new().name("lc-fs-list".into()).spawn(work).is_err() {
+            cell.lock().unwrap_or_else(std::sync::PoisonError::into_inner).running = false;
+        }
+        #[cfg(target_arch = "wasm32")]
+        work();
+    }
+    lock(&cell)
 }
 
 /// A folder on disk with a disclosure triangle: click browses it, the triangle lists its

@@ -232,6 +232,18 @@ impl Backend {
         }
     }
 
+    /// Is there a file at `path`?
+    pub async fn exists(&self, path: &str) -> Result<bool, String> {
+        match self {
+            Backend::Opfs(root) => Ok(Self::opfs_file(root, path, false).await?.is_some()),
+            Backend::Idb(db) => {
+                let (_tx, store) = Self::idb_store(db, false)?;
+                let n = idb_req(&store.count_with_key(&path.into()).map_err(err)?).await?;
+                Ok(n.as_f64().is_some_and(|n| n > 0.0))
+            }
+        }
+    }
+
     pub async fn remove(&self, path: &str) -> Result<(), String> {
         match self {
             Backend::Opfs(root) => {
@@ -309,14 +321,25 @@ async fn dir_keys(dir: &FileSystemDirectoryHandle) -> Result<Vec<String>, String
     Ok(out)
 }
 
-/// Ask the browser not to evict our storage under pressure (best effort; fire and forget).
-pub fn request_persistence() {
-    if let Some(sm) = storage_manager()
-        && let Ok(p) = sm.persist()
-    {
-        wasm_bindgen_futures::spawn_local(async move {
-            let granted = JsFuture::from(p).await.ok().is_some_and(|v| v.is_truthy());
-            log::info!("lightcraft: persistent storage {}", if granted { "granted" } else { "not granted (best effort)" });
-        });
-    }
+/// Ask the browser not to evict our storage under pressure; `on_result(granted)` once known
+/// (`false` also when the browser has no storage manager).
+pub fn request_persistence(on_result: impl FnOnce(bool) + 'static) {
+    let Some(sm) = storage_manager() else {
+        on_result(false);
+        return;
+    };
+    wasm_bindgen_futures::spawn_local(async move {
+        // already persistent: nothing to ask
+        let already = match sm.persisted() {
+            Ok(p) => JsFuture::from(p).await.ok().is_some_and(|v| v.is_truthy()),
+            Err(_) => false,
+        };
+        let granted = already
+            || match sm.persist() {
+                Ok(p) => JsFuture::from(p).await.ok().is_some_and(|v| v.is_truthy()),
+                Err(_) => false,
+            };
+        log::info!("lightcraft: persistent storage {}", if granted { "granted" } else { "not granted" });
+        on_result(granted);
+    });
 }

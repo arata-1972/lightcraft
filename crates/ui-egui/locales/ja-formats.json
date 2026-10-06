@@ -97,5 +97,8 @@
   "{} spot(s) on this photo": "この写真に{}か所のスポット",
   "· {dups} already in the library": "・{dups}枚は読み込み済み",
   "· {n} photo{}": "・{n}枚{:.0}",
-  "… and {more} more": "…ほか{more}件"
+  "… and {more} more": "…ほか{more}件",
+  "Import cancelled · {} photo{} added": "読み込みを中止しました・{}枚を追加{:.0}",
+  "Reading photos… {} of {}": "写真を確認中：{1}枚中{0}枚",
+  "Adding photos… {} of {}": "写真を追加中：{1}枚中{0}枚"
 }

@@ -9,14 +9,26 @@ use crate::{Result, Session};
 
 fn save(s: &mut Session, p: &Value) -> Result<Value> {
     let mut written = Vec::new();
+    let mut merged = Vec::new();
+    let mut backups = Vec::new();
     let mut failed = Vec::new();
+    let owners = crate::sidecar::StemOwners::of(&s.catalog);
     for id in s.targets(p) {
-        match s.save_sidecar(id) {
-            Ok(path) => written.push(path.display().to_string()),
+        match s.save_sidecar_with(id, &owners) {
+            Ok(r) => {
+                let path = r.path.display().to_string();
+                if r.merged {
+                    merged.push(path.clone());
+                }
+                if let Some(b) = r.backup {
+                    backups.push(json!({"path": path, "backup": b.display().to_string()}));
+                }
+                written.push(path);
+            }
             Err(e) => failed.push(json!({"id": id.0, "error": e.to_string()})),
         }
     }
-    Ok(json!({"written": written, "failed": failed}))
+    Ok(json!({"written": written, "merged": merged, "backups": backups, "failed": failed}))
 }
 
 fn read(s: &mut Session, p: &Value) -> Result<Value> {
@@ -63,7 +75,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Save Metadata to File",
             ["Photo"],
             Some("Cmd+S"),
-            "{ids?} — writes each photo's XMP sidecar (metadata + develop settings) next to the original → {written: [path], failed}",
+            "{ids?} — writes each photo's XMP sidecar (metadata + develop settings) next to the original, merged into an existing one (other apps' data kept; an unreadable one is backed up first) → {written: [path], merged: [path], backups: [{path, backup}], failed}",
             has_selection,
             save
         ),

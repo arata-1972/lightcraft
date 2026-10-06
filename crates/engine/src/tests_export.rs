@@ -207,3 +207,119 @@ fn export_falls_back_to_the_cpu_when_gpu_work_is_lost() {
     assert!(m > 0.02, "not black: mean {m}");
     assert!((m - healthy).abs() < 0.01, "GPU {healthy} vs CPU {m}");
 }
+
+/// A JPEG original `dir/IMG_1.jpg` imported into a library on disk.
+fn library_with_jpeg(tag: &str) -> (Session, lightcraft_catalog::PhotoId, std::path::PathBuf, std::path::PathBuf, Vec<u8>) {
+    let dir = temp_dir(tag);
+    let src = dir.join("IMG_1.jpg");
+    let img = lightcraft_raster::Rgba8::from_fn(48, 32, |x, y| [(x * 5) as u8, (y * 7) as u8, 120, 255]);
+    let bytes = crate::export::encode_image(&img, &ExportOptions::default()).unwrap();
+    std::fs::write(&src, &bytes).unwrap();
+    let mut s = Session::new().with_fs();
+    s.execute("library.import", &json!({"paths": [src.to_string_lossy()]})).unwrap();
+    let id = s.catalog.photos().next().unwrap().id;
+    s.execute("develop.set", &json!({"ids": [id.0], "control": "light.exposure", "value": 1.0})).unwrap();
+    (s, id, dir, src, bytes)
+}
+
+fn disk_batch(
+    s: &mut Session,
+    id: lightcraft_catalog::PhotoId,
+    o: &ExportOptions,
+    to: &crate::export::Destination,
+) -> Result<Vec<serde_json::Value>, String> {
+    crate::export::export_batch(s, &[id], o, to, &mut crate::export::write_file, &|p| std::path::Path::new(p).exists())
+}
+
+/// Issue #93: exporting into the photo's own folder as `{name}` with "Overwrite" replaced the
+/// original with the re-encoded render. It is refused now, whatever the policy or exact path.
+#[test]
+fn export_never_overwrites_an_original() {
+    use crate::export::{Conflict, Destination};
+    let (mut s, id, dir, src, original) = library_with_jpeg("export-guard");
+    let folder = Destination { dir: dir.to_string_lossy().to_string(), exact: None };
+    let o = ExportOptions { naming: "{name}".into(), conflict: Conflict::Overwrite, ..Default::default() };
+    let err = disk_batch(&mut s, id, &o, &folder).unwrap_err();
+    assert!(err.contains("original of IMG_1.jpg"), "{err}");
+    assert_eq!(std::fs::read(&src).unwrap(), original, "the original is byte-identical");
+
+    // the exact path of the control channel / MCP, also spelled another way
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    for exact in [src.to_string_lossy().to_string(), dir.join("sub/../IMG_1.jpg").to_string_lossy().to_string()] {
+        let to = Destination { dir: String::new(), exact: Some(exact) };
+        assert!(disk_batch(&mut s, id, &o, &to).unwrap_err().contains("never writes over an original"));
+    }
+    // the "Original" format re-writing the file onto itself (and its sidecar)
+    let orig = ExportOptions { format: ExportFormat::Original, ..o.clone() };
+    assert!(disk_batch(&mut s, id, &orig, &folder).is_err());
+    assert_eq!(std::fs::read(&src).unwrap(), original);
+    assert!(s.execute("export.checkTarget", &json!({"path": src.to_string_lossy()})).is_err());
+    assert!(s.execute("export.checkTarget", &json!({"path": dir.join("free.jpg").to_string_lossy()})).is_ok());
+
+    // Unique moves past it; Overwrite still replaces an ordinary earlier export
+    let unique = ExportOptions { conflict: Conflict::Unique, ..o.clone() };
+    let files = disk_batch(&mut s, id, &unique, &folder).unwrap();
+    assert!(files[0]["path"].as_str().unwrap().ends_with("IMG_1-2.jpg"), "{files:?}");
+    let earlier = dir.join("IMG_1-2.jpg");
+    std::fs::write(&earlier, b"an earlier export").unwrap();
+    let named = ExportOptions { naming: "{name}-2".into(), ..o };
+    disk_batch(&mut s, id, &named, &folder).unwrap();
+    assert_ne!(std::fs::read(&earlier).unwrap(), b"an earlier export", "an ordinary file is overwritten");
+    assert_eq!(std::fs::read(&src).unwrap(), original);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Issue #93: the XMP sidecar of an "Original" export ignored the conflict policy.
+#[test]
+fn export_sidecars_follow_the_conflict_policy() {
+    use crate::export::{Conflict, Destination};
+    let (mut s, id, dir, _src, original) = library_with_jpeg("export-sidecar");
+    let out = dir.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let theirs = out.join("IMG_1.xmp");
+    std::fs::write(&theirs, b"someone else's sidecar").unwrap();
+    let to = Destination { dir: out.to_string_lossy().to_string(), exact: None };
+    let o = ExportOptions { format: ExportFormat::Original, naming: "{name}".into(), ..Default::default() };
+
+    // Unique: the photo and its sidecar both move to the next free name
+    let files = disk_batch(&mut s, id, &ExportOptions { conflict: Conflict::Unique, ..o.clone() }, &to).unwrap();
+    assert!(files[0]["path"].as_str().unwrap().ends_with("IMG_1-2.jpg"), "{files:?}");
+    assert!(files[0]["sidecars"][0].as_str().unwrap().ends_with("IMG_1-2.xmp"), "{files:?}");
+    assert_eq!(std::fs::read(&theirs).unwrap(), b"someone else's sidecar");
+    assert_eq!(std::fs::read(out.join("IMG_1-2.jpg")).unwrap(), original);
+    // Skip: a taken sidecar name skips the photo
+    std::fs::remove_file(out.join("IMG_1-2.jpg")).unwrap();
+    std::fs::remove_file(out.join("IMG_1-2.xmp")).unwrap();
+    let files = disk_batch(&mut s, id, &ExportOptions { conflict: Conflict::Skip, ..o.clone() }, &to).unwrap();
+    assert!(files[0]["skipped"].as_str().is_some(), "{files:?}");
+    assert!(!out.join("IMG_1.jpg").exists());
+    assert_eq!(std::fs::read(&theirs).unwrap(), b"someone else's sidecar");
+    // Overwrite: replaced, as asked
+    disk_batch(&mut s, id, &ExportOptions { conflict: Conflict::Overwrite, ..o }, &to).unwrap();
+    assert!(std::fs::read_to_string(&theirs).unwrap().contains("xmpmeta"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Issue #93: the native writer truncated the target first; a failure mid-write (full disk,
+/// unplugged drive) now leaves the previous file intact and no partial one.
+#[test]
+fn a_failed_export_write_keeps_the_previous_file() {
+    use crate::export::{Conflict, Destination};
+    let (mut s, id, dir, _src, _) = library_with_jpeg("export-midwrite");
+    let out = dir.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let prev = out.join("IMG_1.jpg");
+    std::fs::write(&prev, b"last week's export").unwrap();
+    let to = Destination { dir: out.to_string_lossy().to_string(), exact: None };
+    let o = ExportOptions { conflict: Conflict::Overwrite, ..Default::default() };
+    {
+        let _fault = lightcraft_catalog::safe_file::fail_writes_after(100);
+        let err = disk_batch(&mut s, id, &o, &to).unwrap_err();
+        assert!(err.contains("injected"), "{err}");
+    }
+    assert_eq!(std::fs::read(&prev).unwrap(), b"last week's export");
+    assert_eq!(std::fs::read_dir(&out).unwrap().count(), 1, "no temp file left behind");
+    disk_batch(&mut s, id, &o, &to).unwrap();
+    assert_ne!(std::fs::read(&prev).unwrap(), b"last week's export");
+    let _ = std::fs::remove_dir_all(&dir);
+}
